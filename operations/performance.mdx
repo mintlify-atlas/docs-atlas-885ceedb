@@ -1,0 +1,267 @@
+---
+title: 'Performance'
+description: 'Benchmark data, optimization tips, and performance tuning for SmolVM'
+---
+
+## Performance Overview
+
+SmolVM is optimized for low-latency agent workflows, delivering sub-second boot times and fast command execution. Understanding these performance characteristics helps you build responsive AI agents.
+
+## Lifecycle Benchmarks
+
+Latest lifecycle timings (p50) measured on a standard Linux host with AMD Ryzen 7 7800X3D (8C/16T), Ubuntu Linux, KVM/Firecracker backend:
+
+| Phase | Time |
+|---|---|
+| Create + Start | ~572ms |
+| SSH ready | ~2.1s |
+| Command execution | **~43ms** |
+| Stop + Delete | ~751ms |
+| **Full lifecycle (boot → run → teardown)** | **~3.5s** |
+
+<Info>
+  These benchmarks represent median (p50) values. Your actual performance may vary based on host hardware, kernel version, and system load.
+</Info>
+
+## Running Benchmarks
+
+You can measure performance on your own infrastructure using the included benchmark script:
+
+```bash
+python scripts/benchmarks/bench_subprocess.py --vms 10 -v
+```
+
+### Benchmark Options
+
+<ParamField path="--vms" type="integer" default="5">
+  Number of VMs to benchmark for statistical analysis
+</ParamField>
+
+<ParamField path="--dry-run" type="boolean">
+  Count subprocess calls without executing (works on any platform)
+</ParamField>
+
+<ParamField path="--json" type="boolean">
+  Output results as JSON for automated ingestion
+</ParamField>
+
+<ParamField path="-v, --verbose" type="boolean">
+  Enable detailed logging of each benchmark phase
+</ParamField>
+
+### Understanding Benchmark Metrics
+
+The benchmark script measures these key phases:
+
+- **Create (network setup)**: TAP device creation, NAT configuration, and IP allocation
+- **Start (boot)**: VM boot and Firecracker/QEMU process initialization
+- **SSH ready**: Time until SSH connection is available
+- **Run cmd (1st)**: First command execution (cold SSH connection)
+- **Run cmd (2nd)**: Second command execution (warm SSH connection reuse)
+- **Stop**: Graceful VM shutdown
+- **Delete (network teardown)**: Cleanup of network resources and VM state
+
+## Optimization Tips
+
+### Reduce Boot Time
+
+Minimize the time from VM creation to SSH availability:
+
+<Steps>
+<Step title="Use isolated disk mode">
+  The default `disk_mode="isolated"` provides per-VM disk isolation with minimal overhead:
+  
+  ```python
+  from smolvm import SmolVM
+  
+  # Default isolated mode (recommended)
+  vm = SmolVM()  # Automatically uses isolated disk
+  ```
+</Step>
+
+<Step title="Pre-build custom images">
+  Build images with pre-installed dependencies to avoid package installation during runtime:
+  
+  ```bash
+  smolvm build --packages "python3-pip git curl"
+  ```
+</Step>
+
+<Step title="Keep VMs warm for sequential tasks">
+  Reuse VMs across multiple operations instead of creating/destroying for each task:
+  
+  ```python
+  from smolvm import SmolVM
+  
+  vm = SmolVM()
+  vm.start()
+  
+  # Execute multiple commands on the same VM
+  for task in tasks:
+      result = vm.run(task.command)
+      process_result(result)
+  
+  vm.stop()
+  ```
+</Step>
+</Steps>
+
+### Optimize Command Execution
+
+Command execution is already fast (~43ms), but you can optimize further:
+
+```python
+from smolvm import SmolVM
+
+with SmolVM() as vm:
+    # First command: ~43ms (establishes SSH connection)
+    vm.run("echo 'First command'")
+    
+    # Subsequent commands: faster due to connection reuse
+    vm.run("echo 'Second command'")
+    vm.run("echo 'Third command'")
+```
+
+<Info>
+  SSH connections are automatically reused within the same VM instance, reducing latency for subsequent commands.
+</Info>
+
+### Memory and Resource Sizing
+
+Configure VM resources based on your workload:
+
+```python
+from smolvm import SmolVM
+
+# Lightweight agent (default: 512MB RAM, 2GB disk)
+vm = SmolVM()
+
+# Resource-intensive workload
+vm = SmolVM(
+    mem_size_mib=2048,   # 2GB RAM
+    disk_size_mib=8192   # 8GB disk
+)
+```
+
+<Warning>
+  Larger memory and disk allocations may slightly increase boot time but provide more headroom for complex tasks.
+</Warning>
+
+### High-Density Deployments
+
+When running many VMs concurrently:
+
+1. **Monitor host resources**: Each VM consumes memory and CPU. Plan capacity accordingly.
+2. **Stagger VM creation**: Avoid creating dozens of VMs simultaneously to prevent resource contention.
+3. **Use cleanup**: Regularly clean up stopped VMs to free resources:
+
+```bash
+smolvm cleanup --all
+```
+
+## Performance Characteristics by Backend
+
+### Firecracker (Linux)
+
+- **Boot time**: Sub-second to SSH ready (~2.1s total)
+- **Memory overhead**: ~5-10MB per VM (beyond guest allocation)
+- **Best for**: Production deployments, high-density scenarios
+
+### QEMU (macOS)
+
+- **Boot time**: Slightly slower than Firecracker
+- **Memory overhead**: Higher than Firecracker
+- **Best for**: Development and testing on macOS
+
+<Info>
+  The backend is automatically selected based on your platform. Use `smolvm doctor` to verify your configuration.
+</Info>
+
+## Monitoring Performance
+
+Track VM performance in your application:
+
+```python
+import time
+from smolvm import SmolVM
+
+start = time.time()
+vm = SmolVM()
+vm.start()
+create_time = time.time() - start
+
+start = time.time()
+vm.wait_for_ssh(timeout=30.0)
+ssh_ready_time = time.time() - start
+
+start = time.time()
+result = vm.run("echo 'test'")
+exec_time = time.time() - start
+
+print(f"Create: {create_time:.2f}s")
+print(f"SSH ready: {ssh_ready_time:.2f}s")
+print(f"Command: {exec_time:.2f}s")
+
+vm.stop()
+```
+
+## Performance Troubleshooting
+
+If you're experiencing slower than expected performance:
+
+<AccordionGroup>
+  <Accordion title="Check host KVM support (Linux)">
+    Verify KVM is enabled and accessible:
+    
+    ```bash
+    smolvm doctor --backend firecracker
+    ```
+    
+    Without KVM, performance will be severely degraded.
+  </Accordion>
+  
+  <Accordion title="Monitor system load">
+    High CPU or memory usage on the host can impact VM performance:
+    
+    ```bash
+    # Check system resources
+    htop
+    
+    # Check active VMs
+    smolvm list
+    ```
+  </Accordion>
+  
+  <Accordion title="Review network configuration">
+    Network setup overhead appears in the "Create" phase. If this is slow:
+    
+    ```bash
+    # Check for stale TAP devices
+    ip link show | grep tap
+    
+    # Clean up orphaned resources
+    smolvm cleanup --all
+    ```
+  </Accordion>
+  
+  <Accordion title="Verify image integrity">
+    Corrupted or slow disk I/O can impact boot time:
+    
+    ```bash
+    # Rebuild the default image
+    smolvm build --force
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Troubleshooting" icon="wrench" href="/operations/troubleshooting">
+    Debug common issues and errors
+  </Card>
+  
+  <Card title="Security Considerations" icon="shield" href="/operations/security-considerations">
+    Best practices for secure deployments
+  </Card>
+</CardGroup>

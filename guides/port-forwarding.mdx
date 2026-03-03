@@ -1,0 +1,483 @@
+---
+title: Port Forwarding
+description: Expose guest services on localhost with automatic port forwarding, SSH tunnels, and network configuration
+---
+
+## Overview
+
+SmolVM provides flexible port forwarding to expose services running inside VMs on your host machine. The `expose_local()` method automatically sets up localhost-only port forwarding using either nftables or SSH tunnels as a fallback.
+
+## Quick Start
+
+```python
+from smolvm import SmolVM
+
+with SmolVM() as vm:
+    # Start a web server in the guest
+    vm.run("apk add --no-cache python3")
+    vm.run("python3 -m http.server 8000 > /dev/null 2>&1 &")
+    
+    # Expose guest port 8000 on host localhost:8000
+    host_port = vm.expose_local(guest_port=8000, host_port=8000)
+    
+    print(f"Server available at http://127.0.0.1:{host_port}")
+    input("Press Enter to stop...")
+```
+
+## Basic Port Forwarding
+
+### Expose with Specific Port
+
+```python
+with SmolVM() as vm:
+    # Forward localhost:3000 -> guest:8080
+    host_port = vm.expose_local(guest_port=8080, host_port=3000)
+    
+    print(f"Access guest service at localhost:{host_port}")
+```
+
+### Auto-Assign Port
+
+Let SmolVM choose an available port:
+
+```python
+with SmolVM() as vm:
+    # SmolVM finds an available port automatically
+    host_port = vm.expose_local(guest_port=8080)
+    
+    print(f"Assigned port: {host_port}")
+    # Might be 43251, 38492, or any available port
+```
+
+<Note>
+When `host_port` is omitted, SmolVM automatically selects an available port on localhost.
+</Note>
+
+## Transport Methods
+
+SmolVM uses two transport methods, trying them in order:
+
+<Steps>
+  <Step title="nftables (Preferred)">
+    Direct kernel-level port forwarding using nftables:
+    - Fastest performance
+    - No additional processes
+    - Linux only
+    - Requires appropriate permissions
+  </Step>
+
+  <Step title="SSH Tunnel (Fallback)">
+    SSH-based port forwarding:
+    - Works everywhere SSH is available
+    - Slightly slower than nftables
+    - Spawns background SSH process
+    - Automatically cleaned up
+  </Step>
+</Steps>
+
+```python
+with SmolVM() as vm:
+    # SmolVM automatically chooses the best available method
+    host_port = vm.expose_local(guest_port=8000)
+    
+    # Check logs to see which transport was used:
+    # "transport=nftables" or "transport=ssh_tunnel"
+```
+
+## Multiple Port Forwards
+
+Expose multiple services from the same VM:
+
+```python
+with SmolVM() as vm:
+    # Start multiple services
+    vm.run("apk add --no-cache python3 nginx")
+    vm.run("python3 -m http.server 8000 > /dev/null 2>&1 &")
+    vm.run("nginx")
+    
+    # Expose both
+    http_port = vm.expose_local(guest_port=8000, host_port=8000)
+    nginx_port = vm.expose_local(guest_port=80, host_port=8080)
+    
+    print(f"Python server: http://localhost:{http_port}")
+    print(f"Nginx: http://localhost:{nginx_port}")
+```
+
+## Real-World Examples
+
+### Web Application Development
+
+```python
+from smolvm import SmolVM
+
+with SmolVM(mem_size_mib=1024) as vm:
+    # Install Node.js and run a web app
+    vm.run("apk add --no-cache nodejs npm")
+    vm.run("mkdir -p /app && cd /app && npm init -y")
+    vm.run("cd /app && npm install express")
+    
+    # Create simple Express app
+    vm.run("""
+cat > /app/server.js << 'EOF'
+const express = require('express');
+const app = express();
+app.get('/', (req, res) => res.send('Hello from SmolVM!'));
+app.listen(3000, '0.0.0.0', () => console.log('Server ready'));
+EOF
+""")
+    
+    # Start the server
+    vm.run("cd /app && node server.js > /tmp/server.log 2>&1 &")
+    
+    # Expose on localhost
+    port = vm.expose_local(guest_port=3000, host_port=3000)
+    print(f"App running at http://localhost:{port}")
+    
+    input("Press Enter to stop...")
+```
+
+### Database Access
+
+```python
+from smolvm import SmolVM
+
+with SmolVM(mem_size_mib=2048) as vm:
+    # Install and start PostgreSQL
+    vm.run("apk add --no-cache postgresql postgresql-contrib")
+    vm.run("mkdir -p /var/lib/postgresql/data")
+    vm.run("chown -R postgres:postgres /var/lib/postgresql")
+    vm.run("su - postgres -c 'initdb -D /var/lib/postgresql/data'")
+    vm.run(
+        "su - postgres -c 'pg_ctl -D /var/lib/postgresql/data start'",
+        timeout=30
+    )
+    
+    # Expose PostgreSQL port
+    db_port = vm.expose_local(guest_port=5432, host_port=5432)
+    
+    print(f"PostgreSQL available at localhost:{db_port}")
+    print(f"Connect with: psql -h localhost -p {db_port} -U postgres")
+    
+    input("Press Enter to stop...")
+```
+
+### API Development
+
+```python
+from smolvm import SmolVM
+
+with SmolVM() as vm:
+    # Install Python and Flask
+    vm.run("apk add --no-cache python3 py3-pip")
+    vm.run("pip3 install flask")
+    
+    # Create API server
+    vm.run("""
+cat > /app.py << 'EOF'
+from flask import Flask, jsonify
+import os
+
+app = Flask(__name__)
+
+@app.route('/api/status')
+def status():
+    return jsonify({
+        'status': 'ok',
+        'vm_id': os.getenv('VM_ID', 'unknown')
+    })
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+EOF
+""")
+    
+    vm.set_env_vars({"VM_ID": vm.vm_id})
+    vm.run("python3 /app.py > /tmp/api.log 2>&1 &")
+    
+    # Expose API
+    api_port = vm.expose_local(guest_port=5000)
+    print(f"API endpoint: http://localhost:{api_port}/api/status")
+    
+    input("Press Enter to stop...")
+```
+
+### Dashboard with Auto-Port
+
+```python
+from smolvm import SmolVM
+
+with SmolVM() as vm:
+    vm.run("apk add --no-cache python3")
+    vm.run("python3 -m http.server 8080 > /dev/null 2>&1 &")
+    
+    # Let SmolVM choose port (useful when default is busy)
+    port = vm.expose_local(guest_port=8080)
+    
+    print(f"Dashboard: http://localhost:{port}")
+    print(f"(Auto-assigned port: {port})")
+```
+
+## Removing Port Forwards
+
+Cleanly remove port forwarding:
+
+```python
+with SmolVM() as vm:
+    # Create forward
+    host_port = vm.expose_local(guest_port=8000, host_port=8000)
+    
+    # Use the service...
+    
+    # Remove the forward
+    vm.unexpose_local(host_port=8000, guest_port=8000)
+    
+    print("Port forward removed")
+```
+
+<Note>
+Port forwards are automatically removed when:
+- VM stops
+- VM is deleted
+- Context manager exits
+</Note>
+
+## Port Conflicts and Fallbacks
+
+SmolVM handles port conflicts gracefully:
+
+```python
+with SmolVM() as vm1:
+    # VM1 gets port 8000
+    port1 = vm1.expose_local(guest_port=80, host_port=8000)
+    print(f"VM1 on port: {port1}")  # 8000
+    
+    with SmolVM() as vm2:
+        # VM2 can't use 8000, gets next available
+        port2 = vm2.expose_local(guest_port=80, host_port=8000)
+        print(f"VM2 on port: {port2}")  # Different port (auto-assigned)
+```
+
+If the requested port is unavailable:
+1. SmolVM tries the requested port
+2. If busy, automatically allocates an available port
+3. Returns the actual port used
+
+```python
+with SmolVM() as vm:
+    requested_port = 8000
+    actual_port = vm.expose_local(guest_port=80, host_port=requested_port)
+    
+    if actual_port != requested_port:
+        print(f"Port {requested_port} was busy")
+        print(f"Using {actual_port} instead")
+```
+
+## Error Handling
+
+```python
+from smolvm import SmolVM
+from smolvm.exceptions import SmolVMError
+
+try:
+    with SmolVM() as vm:
+        # VM must be running
+        vm.stop()
+        vm.expose_local(guest_port=8000)
+except SmolVMError as e:
+    print(f"Error: {e}")
+    # Error: Cannot expose port: VM is stopped
+```
+
+### Validation Errors
+
+```python
+try:
+    vm.expose_local(guest_port=99999)  # Invalid port
+except ValueError as e:
+    print(f"Invalid port: {e}")
+    # guest_port must be 1-65535
+
+try:
+    vm.expose_local(guest_port=80, host_port=0)
+except ValueError as e:
+    print(f"Invalid port: {e}")
+    # host_port must be 1-65535
+```
+
+## Advanced Patterns
+
+### Checking Port Availability
+
+```python
+import socket
+
+def is_port_available(port: int) -> bool:
+    """Check if a port is available on localhost."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", port))
+            return True
+    except OSError:
+        return False
+
+with SmolVM() as vm:
+    desired_port = 8000
+    
+    if is_port_available(desired_port):
+        port = vm.expose_local(guest_port=80, host_port=desired_port)
+    else:
+        # Let SmolVM choose
+        port = vm.expose_local(guest_port=80)
+    
+    print(f"Service on port: {port}")
+```
+
+### Multiple VMs with Port Management
+
+```python
+from smolvm import SmolVM
+
+class ServiceCluster:
+    def __init__(self, num_instances: int):
+        self.vms = []
+        self.ports = []
+    
+    def start(self):
+        for i in range(num_instances):
+            vm = SmolVM()
+            vm.start()
+            
+            # Start service in each VM
+            vm.run("apk add --no-cache python3")
+            vm.run(f"python3 -m http.server 8000 &")
+            
+            # Expose on different host ports
+            port = vm.expose_local(guest_port=8000)
+            
+            self.vms.append(vm)
+            self.ports.append(port)
+            print(f"Instance {i+1}: http://localhost:{port}")
+    
+    def stop(self):
+        for vm in self.vms:
+            vm.stop()
+            vm.delete()
+
+cluster = ServiceCluster(3)
+cluster.start()
+input("Press Enter to stop cluster...")
+cluster.stop()
+```
+
+### Dynamic Service Discovery
+
+```python
+import json
+from smolvm import SmolVM
+
+with SmolVM() as vm:
+    # Start multiple services
+    services = {
+        "api": 5000,
+        "metrics": 9090,
+        "health": 8080
+    }
+    
+    ports = {}
+    for name, guest_port in services.items():
+        vm.run(f"python3 -m http.server {guest_port} &")
+        host_port = vm.expose_local(guest_port=guest_port)
+        ports[name] = host_port
+    
+    # Write service registry
+    registry = {
+        "vm_id": vm.vm_id,
+        "services": {
+            name: f"http://localhost:{port}"
+            for name, port in ports.items()
+        }
+    }
+    
+    print("Service Registry:")
+    print(json.dumps(registry, indent=2))
+```
+
+## Integration with OpenClaw Example
+
+From the real-world OpenClaw example:
+
+```python
+from smolvm import SmolVM, VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+
+GUEST_DASHBOARD_PORT = 18789
+HOST_DASHBOARD_PORT = 18789
+
+config = VMConfig(
+    vm_id="openclaw-demo",
+    vcpu_count=1,
+    mem_size_mib=2048,
+    kernel_path=kernel,
+    rootfs_path=rootfs,
+    boot_args=SSH_BOOT_ARGS,
+)
+
+with SmolVM(config) as vm:
+    # Install and start OpenClaw gateway
+    vm.run("npm install -g openclaw")
+    vm.run(
+        f"openclaw gateway --port {GUEST_DASHBOARD_PORT} "
+        f"--token my-token &",
+        timeout=30
+    )
+    
+    # Expose dashboard
+    host_port = vm.expose_local(
+        guest_port=GUEST_DASHBOARD_PORT,
+        host_port=HOST_DASHBOARD_PORT
+    )
+    
+    print(f"OpenClaw Dashboard: http://127.0.0.1:{host_port}/")
+    
+    if host_port != HOST_DASHBOARD_PORT:
+        print(f"Note: Port {HOST_DASHBOARD_PORT} was busy, using {host_port}")
+    
+    input("Press Enter to stop...")
+```
+
+## Security Considerations
+
+<Warning>
+Port forwards created by `expose_local()` bind to `127.0.0.1` (localhost only) and are **not** accessible from external networks. This is a security feature.
+</Warning>
+
+### Localhost-Only Binding
+
+```python
+with SmolVM() as vm:
+    port = vm.expose_local(guest_port=8000)
+    
+    # Accessible from host:
+    # ✓ http://127.0.0.1:{port}
+    # ✓ http://localhost:{port}
+    
+    # NOT accessible from network:
+    # ✗ http://192.168.1.100:{port}
+    # ✗ http://host-ip:{port}
+```
+
+For external access, use proper network configuration or reverse proxies.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Command Execution" icon="terminal" href="/guides/command-execution">
+    Run services and applications inside VMs
+  </Card>
+  <Card title="Custom Images" icon="box" href="/guides/custom-images">
+    Build images with pre-installed services
+  </Card>
+  <Card title="AI Agent Integration" icon="robot" href="/guides/ai-agent-integration">
+    Expose AI agent tools via HTTP
+  </Card>
+</CardGroup>

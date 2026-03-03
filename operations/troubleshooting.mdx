@@ -1,0 +1,485 @@
+---
+title: 'Troubleshooting'
+description: 'Common issues, debugging techniques, and diagnostic tools for SmolVM'
+---
+
+## Diagnostic Tools
+
+SmolVM includes built-in diagnostic capabilities to help you identify and resolve issues quickly.
+
+### Doctor Command
+
+The `smolvm doctor` command validates your environment and reports any issues:
+
+```bash
+# Auto-detect backend (Darwin → qemu, Linux → firecracker)
+smolvm doctor
+
+# Force specific backend checks
+smolvm doctor --backend firecracker
+smolvm doctor --backend qemu
+
+# CI-friendly mode with strict validation
+smolvm doctor --json --strict
+```
+
+<Info>
+  Run `smolvm doctor` first when experiencing issues. It checks KVM support, Firecracker/QEMU availability, network configuration, and permissions.
+</Info>
+
+## Common Issues
+
+### VM Creation and Startup
+
+<AccordionGroup>
+  <Accordion title="VMAlreadyExistsError: VM already exists" icon="copy">
+    **Cause**: You're attempting to create a VM with an ID that's already in use.
+    
+    **Solution**: Either reconnect to the existing VM or use a different ID:
+    
+    ```python
+    from smolvm import SmolVM
+    from smolvm.exceptions import VMAlreadyExistsError
+    
+    try:
+        vm = SmolVM(vm_id="my-vm")
+    except VMAlreadyExistsError:
+        # Reconnect to existing VM
+        vm = SmolVM.from_id("my-vm")
+    ```
+    
+    Or clean up the existing VM:
+    
+    ```bash
+    smolvm cleanup --vm-id my-vm
+    ```
+  </Accordion>
+  
+  <Accordion title="VMNotFoundError: VM not found" icon="magnifying-glass">
+    **Cause**: Attempting to reconnect to a VM that doesn't exist or was already deleted.
+    
+    **Solution**: Verify the VM ID exists:
+    
+    ```bash
+    smolvm list
+    ```
+    
+    If the VM was deleted, create a new one:
+    
+    ```python
+    from smolvm import SmolVM
+    
+    vm = SmolVM()  # Creates new VM with auto-generated ID
+    vm.start()
+    ```
+  </Accordion>
+  
+  <Accordion title="HostError: KVM not available" icon="server">
+    **Cause**: Your Linux system doesn't have KVM support enabled or accessible.
+    
+    **Solution**:
+    
+    1. Verify KVM is available:
+       ```bash
+       ls -la /dev/kvm
+       ```
+    
+    2. Check if your CPU supports virtualization:
+       ```bash
+       egrep -c '(vmx|svm)' /proc/cpuinfo
+       # Should return > 0
+       ```
+    
+    3. Ensure KVM kernel modules are loaded:
+       ```bash
+       lsmod | grep kvm
+       ```
+    
+    4. Add your user to the `kvm` group:
+       ```bash
+       sudo usermod -aG kvm $USER
+       # Log out and back in
+       ```
+    
+    5. Re-run the system setup:
+       ```bash
+       sudo ./scripts/system-setup.sh --configure-runtime
+       ```
+  </Accordion>
+  
+  <Accordion title="OperationTimeoutError: VM boot timeout" icon="clock">
+    **Cause**: The VM failed to boot or become SSH-ready within the timeout period.
+    
+    **Solution**:
+    
+    1. Increase the timeout:
+       ```python
+       from smolvm import SmolVM
+       
+       vm = SmolVM()
+       vm.start()
+       vm.wait_for_ssh(timeout=60.0)  # Increase from default
+       ```
+    
+    2. Check system resources:
+       ```bash
+       # High CPU/memory usage can slow boot
+       htop
+       ```
+    
+    3. Verify the VM process is running:
+       ```bash
+       ps aux | grep firecracker
+       ```
+    
+    4. Check Firecracker logs (if available):
+       ```bash
+       # Look for error messages
+       journalctl -xe | grep firecracker
+       ```
+  </Accordion>
+</AccordionGroup>
+
+### Network Issues
+
+<AccordionGroup>
+  <Accordion title="NetworkError: Failed to create TAP device" icon="network-wired">
+    **Cause**: Insufficient permissions or network configuration issues.
+    
+    **Solution**:
+    
+    1. Verify sudo/root access:
+       ```bash
+       # SmolVM network operations require elevated privileges
+       sudo -v
+       ```
+    
+    2. Check for conflicting TAP devices:
+       ```bash
+       ip link show | grep tap
+       ```
+    
+    3. Clean up stale network resources:
+       ```bash
+       smolvm cleanup --all
+       ```
+    
+    4. Re-run system setup to configure network permissions:
+       ```bash
+       sudo ./scripts/system-setup.sh --configure-runtime
+       ```
+  </Accordion>
+  
+  <Accordion title="Cannot access internet from VM" icon="globe">
+    **Cause**: NAT or routing configuration issue.
+    
+    **Solution**:
+    
+    1. Verify NAT is configured:
+       ```bash
+       # Check nftables rules
+       sudo nft list ruleset | grep masquerade
+       ```
+    
+    2. Test connectivity from the VM:
+       ```python
+       from smolvm import SmolVM
+       
+       with SmolVM() as vm:
+           result = vm.run("ping -c 3 8.8.8.8")
+           print(result.output)
+       ```
+    
+    3. Check firewall rules:
+       ```bash
+       # Ensure forwarding is allowed
+       sudo iptables -L FORWARD -v
+       ```
+  </Accordion>
+  
+  <Accordion title="Port forwarding not working" icon="right-left">
+    **Cause**: Port already in use or forwarding rules not applied.
+    
+    **Solution**:
+    
+    1. Check if the host port is available:
+       ```bash
+       netstat -tuln | grep <host_port>
+       ```
+    
+    2. Use a different port:
+       ```python
+       from smolvm import SmolVM
+       
+       with SmolVM() as vm:
+           # Let SmolVM choose an available port
+           host_port = vm.expose_local(guest_port=8080)
+           print(f"Accessible at http://localhost:{host_port}")
+       ```
+    
+    3. Verify forwarding rules:
+       ```bash
+       sudo nft list ruleset | grep dnat
+       ```
+  </Accordion>
+</AccordionGroup>
+
+### SSH and Command Execution
+
+<AccordionGroup>
+  <Accordion title="CommandExecutionUnavailableError" icon="terminal">
+    **Cause**: The VM profile doesn't support command execution or SSH is not configured.
+    
+    **Solution**:
+    
+    Ensure you're using auto-config (default) which sets up SSH:
+    
+    ```python
+    from smolvm import SmolVM
+    
+    # This automatically configures SSH
+    vm = SmolVM()
+    vm.start()
+    vm.wait_for_ssh()
+    
+    result = vm.run("echo 'test'")
+    ```
+  </Accordion>
+  
+  <Accordion title="SSH connection refused" icon="lock">
+    **Cause**: SSH service not started in the VM or connection blocked.
+    
+    **Solution**:
+    
+    1. Wait for SSH to be ready:
+       ```python
+       vm.wait_for_ssh(timeout=30.0)
+       ```
+    
+    2. Check SSH service status:
+       ```python
+       # Try a simple command to verify connectivity
+       result = vm.run("systemctl status ssh")
+       print(result.output)
+       ```
+    
+    3. Verify guest IP and SSH port:
+       ```python
+       from smolvm import SmolVM
+       
+       vm = SmolVM.from_id("my-vm")
+       print(f"Status: {vm.status}")
+       print(f"IP: {vm.get_ip()}")
+       ```
+  </Accordion>
+  
+  <Accordion title="Command hangs or times out" icon="hourglass">
+    **Cause**: Long-running command or SSH connection issue.
+    
+    **Solution**:
+    
+    1. Run commands in the background for long operations:
+       ```python
+       vm.run("long-running-task > /tmp/output.log 2>&1 &")
+       ```
+    
+    2. Check command output for errors:
+       ```python
+       result = vm.run("your-command")
+       if result.exit_code != 0:
+           print(f"Error: {result.stderr}")
+       ```
+  </Accordion>
+</AccordionGroup>
+
+### Image and Storage Issues
+
+<AccordionGroup>
+  <Accordion title="ImageError: Failed to download or build image" icon="hard-drive">
+    **Cause**: Network issues, disk space, or corrupted image cache.
+    
+    **Solution**:
+    
+    1. Check available disk space:
+       ```bash
+       df -h ~/.local/share/smolvm
+       ```
+    
+    2. Clear image cache and rebuild:
+       ```bash
+       rm -rf ~/.local/share/smolvm/images
+       smolvm build --force
+       ```
+    
+    3. Verify network connectivity:
+       ```bash
+       curl -I https://github.com  # Test internet access
+       ```
+  </Accordion>
+  
+  <Accordion title="Disk mode conflicts or read-only filesystem" icon="floppy-disk">
+    **Cause**: Multiple VMs sharing the same disk in conflicting modes.
+    
+    **Solution**:
+    
+    Use isolated disk mode (default) for per-VM isolation:
+    
+    ```python
+    from smolvm import SmolVM
+    
+    # Each VM gets its own writable disk copy (recommended)
+    vm = SmolVM()  # disk_mode="isolated" by default
+    ```
+    
+    Or explicitly set shared mode if needed:
+    
+    ```python
+    from smolvm import VMConfig
+    
+    config = VMConfig(
+        disk_mode="shared"  # Use with caution
+    )
+    vm = SmolVM(config=config)
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Error Reference
+
+SmolVM uses a structured exception hierarchy. All exceptions inherit from `SmolVMError`.
+
+### Exception Types
+
+| Exception | Description | Common Causes |
+|-----------|-------------|---------------|
+| `ValidationError` | Input validation failed | Invalid configuration, bad parameters |
+| `VMAlreadyExistsError` | VM ID already in use | Duplicate VM creation |
+| `VMNotFoundError` | VM doesn't exist | Wrong ID, VM already deleted |
+| `NetworkError` | Network operation failed | TAP device, NAT, IP allocation issues |
+| `HostError` | Host environment issue | Missing KVM, dependencies, permissions |
+| `ImageError` | Image operation failed | Download, checksum, cache problems |
+| `FirecrackerAPIError` | Firecracker API call failed | VM boot failure, API communication |
+| `OperationTimeoutError` | Operation exceeded timeout | Slow boot, network delays |
+| `CommandExecutionUnavailableError` | Command execution not available | SSH not configured, wrong VM profile |
+
+### Accessing Error Details
+
+All exceptions include structured error information:
+
+```python
+from smolvm import SmolVM
+from smolvm.exceptions import SmolVMError, OperationTimeoutError
+
+try:
+    vm = SmolVM()
+    vm.start()
+    vm.wait_for_ssh(timeout=10.0)
+except OperationTimeoutError as e:
+    print(f"Operation: {e.operation}")
+    print(f"Timeout: {e.timeout_seconds}s")
+    print(f"Details: {e.details}")
+except SmolVMError as e:
+    print(f"Error: {e.message}")
+    print(f"Details: {e.details}")
+```
+
+## Debugging Techniques
+
+### Enable Verbose Logging
+
+Increase logging verbosity to see detailed operations:
+
+```python
+import logging
+from smolvm import SmolVM
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger('smolvm')
+logger.setLevel(logging.DEBUG)
+
+vm = SmolVM()
+vm.start()
+```
+
+### Inspect VM State
+
+Check VM status and metadata:
+
+```python
+from smolvm import SmolVM
+
+vm = SmolVM.from_id("my-vm")
+print(f"Status: {vm.status}")
+print(f"VM ID: {vm._vm_id}")
+
+# Get VM info from database
+from smolvm.storage import StateManager
+
+sm = StateManager()
+vm_info = sm.get_vm("my-vm")
+if vm_info:
+    print(f"IP: {vm_info.guest_ip}")
+    print(f"SSH Port: {vm_info.ssh_host_port}")
+```
+
+### Check System State
+
+List all VMs and their states:
+
+```bash
+# CLI
+smolvm list
+
+# Python
+from smolvm.storage import StateManager
+
+sm = StateManager()
+vms = sm.list_vms()
+for vm in vms:
+    print(f"{vm.vm_id}: {vm.state}")
+```
+
+### Clean Up Resources
+
+Remove stale or problematic VMs:
+
+```bash
+# Remove specific VM
+smolvm cleanup --vm-id my-vm
+
+# Remove all VMs
+smolvm cleanup --all
+
+# Force cleanup (skip confirmation)
+smolvm cleanup --all --force
+```
+
+<Warning>
+  `cleanup --all` will terminate and delete all VMs. Make sure you don't have important workloads running.
+</Warning>
+
+## Getting Help
+
+If you're still experiencing issues:
+
+1. **Check the documentation**: Review relevant guides and API reference
+2. **Run diagnostics**: `smolvm doctor --json` provides detailed system info
+3. **Search issues**: Look for similar problems in the [GitHub issues](https://github.com/CelestoAI/SmolVM/issues)
+4. **Join the community**: Get help on [Slack](https://join.slack.com/t/celestoai/shared_invite/zt-3qc7h8gno-Nb5_PElEWHDNnGqdVzC~4Q)
+5. **Report bugs**: Open a new issue with:
+   - Output of `smolvm doctor --json`
+   - Steps to reproduce
+   - Expected vs actual behavior
+   - Relevant logs and error messages
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Performance" icon="gauge-high" href="/operations/performance">
+    Optimize VM performance and throughput
+  </Card>
+  
+  <Card title="Security Considerations" icon="shield-halved" href="/operations/security-considerations">
+    Secure your SmolVM deployments
+  </Card>
+</CardGroup>

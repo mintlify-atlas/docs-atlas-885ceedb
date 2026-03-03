@@ -1,0 +1,220 @@
+---
+title: Installation
+description: Install SmolVM on Linux with Firecracker or macOS with QEMU
+---
+
+# Installation
+
+SmolVM supports two backends depending on your platform:
+- **Linux**: Firecracker (KVM-based, production-ready)
+- **macOS**: QEMU (development and testing)
+
+## Prerequisites
+
+<Tabs>
+  <Tab title="Linux">
+    - **Operating System**: Ubuntu, Debian, or Fedora
+    - **KVM Support**: Your system must support hardware virtualization
+    - **Python**: 3.10 or higher
+    
+    <Note>
+      Check if KVM is available by running `lsmod | grep kvm`. You should see either `kvm_intel` or `kvm_amd`.
+    </Note>
+  </Tab>
+  <Tab title="macOS">
+    - **Operating System**: macOS (any recent version)
+    - **Homebrew**: Package manager for macOS
+    - **QEMU**: Installed via Homebrew
+    - **Python**: 3.10 or higher
+    
+    <Warning>
+      The QEMU backend on macOS is intended for development and testing. For production workloads, use Linux with Firecracker.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## Install SmolVM
+
+<Steps>
+  <Step title="Install the Python package">
+    Install SmolVM using pip:
+
+    <CodeGroup>
+    ```bash pip
+    pip install smolvm
+    ```
+
+    ```bash uv
+    uv pip install smolvm
+    ```
+
+    ```bash pipx
+    pipx install smolvm
+    ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Configure system dependencies">
+    <Tabs>
+      <Tab title="Linux (Firecracker)">
+        Run the system setup script to install Firecracker and configure runtime permissions:
+
+        ```bash
+        sudo ./scripts/system-setup.sh --configure-runtime
+        ```
+
+        This script will:
+        - Install Firecracker and Jailer binaries
+        - Configure required system permissions
+        - Set up networking capabilities
+        - Optionally install Docker (if needed for custom images)
+
+        <Accordion title="Advanced: Custom setup options">
+          ```bash
+          # Check prerequisites without installing
+          sudo ./scripts/system-setup.sh --check-only
+
+          # Install with Docker support
+          sudo ./scripts/system-setup.sh --configure-runtime --with-docker
+
+          # Skip dependency installation (if already installed)
+          sudo ./scripts/system-setup.sh --skip-deps
+
+          # Remove runtime configuration
+          sudo ./scripts/system-setup.sh --remove-runtime-config
+          ```
+        </Accordion>
+      </Tab>
+
+      <Tab title="macOS (QEMU)">
+        Run the macOS setup script to install QEMU:
+
+        ```bash
+        ./scripts/system-setup-macos.sh
+        ```
+
+        This script will:
+        - Install QEMU via Homebrew
+        - Verify SSH is available
+        - Optionally install Docker Desktop
+
+        <Accordion title="Advanced: Custom setup options">
+          ```bash
+          # Check prerequisites without installing
+          ./scripts/system-setup-macos.sh --check-only
+
+          # Install with Docker Desktop
+          ./scripts/system-setup-macos.sh --with-docker
+
+          # Optional: Explicitly set backend
+          export SMOLVM_BACKEND=qemu
+          ```
+        </Accordion>
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Verify installation">
+    Verify that SmolVM is installed correctly:
+
+    <Tabs>
+      <Tab title="Linux">
+        ```bash
+        smolvm doctor --backend firecracker
+        ```
+      </Tab>
+
+      <Tab title="macOS">
+        ```bash
+        smolvm doctor --backend qemu
+        ```
+      </Tab>
+    </Tabs>
+
+    The doctor command will check:
+    - Backend availability (Firecracker or QEMU)
+    - KVM support (Linux only)
+    - Network configuration
+    - SSH utilities
+
+    <Note>
+      For CI-friendly output, use `smolvm doctor --json --strict`
+    </Note>
+  </Step>
+</Steps>
+
+## Post-installation
+
+Once installed, you can:
+
+<CardGroup cols={2}>
+  <Card title="Start the quickstart" icon="rocket" href="/quickstart">
+    Create your first VM
+  </Card>
+  <Card title="Run demos" icon="play">
+    ```bash
+    smolvm demo list
+    smolvm demo simple
+    ```
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="KVM not available on Linux">
+    If you see KVM-related errors:
+
+    1. Check if KVM modules are loaded:
+       ```bash
+       lsmod | grep kvm
+       ```
+
+    2. Ensure your CPU supports virtualization (Intel VT-x or AMD-V)
+
+    3. Enable virtualization in your BIOS/UEFI settings
+
+    4. Load the KVM module:
+       ```bash
+       sudo modprobe kvm
+       sudo modprobe kvm_intel  # or kvm_amd for AMD
+       ```
+  </Accordion>
+
+  <Accordion title="Permission denied errors">
+    If you encounter permission errors:
+
+    1. Re-run the setup script with `--configure-runtime`:
+       ```bash
+       sudo ./scripts/system-setup.sh --configure-runtime
+       ```
+
+    2. Log out and back in for group changes to take effect
+
+    3. Verify your user has the necessary permissions:
+       ```bash
+       groups  # Should include kvm, docker (if installed)
+       ```
+  </Accordion>
+
+  <Accordion title="QEMU not found on macOS">
+    If QEMU is not found:
+
+    1. Ensure Homebrew is installed:
+       ```bash
+       brew --version
+       ```
+
+    2. Install QEMU manually:
+       ```bash
+       brew install qemu
+       ```
+
+    3. Verify installation:
+       ```bash
+       qemu-system-aarch64 --version
+       # or
+       qemu-system-x86_64 --version
+       ```
+  </Accordion>
+</AccordionGroup>

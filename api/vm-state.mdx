@@ -1,0 +1,166 @@
+---
+title: VMState
+description: Enumeration of VM lifecycle states
+---
+
+## Overview
+
+`VMState` is a string-based enumeration that represents the lifecycle state of a SmolVM instance. The state is tracked in the database and can be queried via the `vm.status` property or [`VMInfo.status`](/api/vm-info).
+
+## States
+
+| State | Value | Description |
+|-------|-------|-------------|
+| `CREATED` | `"created"` | VM has been registered but not yet started. The Firecracker process is not running. |
+| `RUNNING` | `"running"` | VM is actively running. The Firecracker process is alive and the guest is booted. |
+| `STOPPED` | `"stopped"` | VM has been explicitly stopped. The Firecracker process has terminated cleanly. |
+| `ERROR` | `"error"` | VM encountered an error during startup or operation. Check logs for details. |
+
+## State Transitions
+
+The typical VM lifecycle follows this flow:
+
+```
+CREATED → RUNNING → STOPPED
+   ↓         ↓
+ ERROR ← ERROR
+```
+
+- **CREATED → RUNNING**: When `vm.start()` is called
+- **RUNNING → STOPPED**: When `vm.stop()` is called or the VM shuts down cleanly
+- **CREATED/RUNNING → ERROR**: When startup fails or the Firecracker process crashes unexpectedly
+
+## Usage Examples
+
+### Checking VM State
+
+```python
+from smolvm import VM, VMState
+
+with VM() as vm:
+    # VM is automatically started in context manager
+    assert vm.get_state() == VMState.RUNNING
+    
+    vm.stop()
+    assert vm.get_state() == VMState.STOPPED
+```
+
+### Querying State from VMInfo
+
+```python
+from smolvm import VM, VMState
+
+vm = VM()
+vm.create()
+
+info = vm.get_info()
+if info.status == VMState.CREATED:
+    print("VM is created but not started yet")
+    vm.start()
+```
+
+### Conditional Logic Based on State
+
+```python
+from smolvm import VM, VMState
+
+vm = VM.from_id("my-vm")
+state = vm.get_state()
+
+if state == VMState.RUNNING:
+    result = vm.run("uptime")
+    print(result.output)
+elif state == VMState.STOPPED:
+    print("VM is stopped, starting...")
+    vm.start()
+elif state == VMState.ERROR:
+    print("VM is in error state, recreating...")
+    vm.delete()
+    vm.create()
+```
+
+### State Filtering with Manager
+
+```python
+from smolvm import SmolVMManager, VMState
+
+manager = SmolVMManager()
+
+# Get all running VMs
+running_vms = [
+    vm for vm in manager.list_vms()
+    if vm.status == VMState.RUNNING
+]
+
+print(f"Found {len(running_vms)} running VMs")
+```
+
+### Enum String Values
+
+```python
+from smolvm import VMState
+
+# Access string value
+print(VMState.RUNNING.value)  # "running"
+
+# String comparison
+state = VMState.RUNNING
+if state.value == "running":
+    print("VM is running")
+
+# Iterate all states
+for state in VMState:
+    print(f"{state.name}: {state.value}")
+```
+
+## Type Information
+
+`VMState` is a `str` enum, inheriting from both `str` and `Enum`. This means:
+
+```python
+from smolvm import VMState
+
+state = VMState.RUNNING
+
+# Can be used as a string
+assert isinstance(state, str)
+assert state == "running"
+
+# Can be used as an enum
+assert isinstance(state, VMState)
+assert state is VMState.RUNNING
+```
+
+## Error State Handling
+
+When a VM enters the `ERROR` state:
+
+1. The Firecracker process may have crashed
+2. Startup may have failed (e.g., kernel panic, invalid configuration)
+3. Network setup may have failed
+
+**Recovery steps:**
+
+```python
+from smolvm import VM, VMState
+
+vm = VM.from_id("my-vm")
+
+if vm.get_state() == VMState.ERROR:
+    # Option 1: Try to restart
+    try:
+        vm.stop()  # Clean up if needed
+        vm.start()
+    except Exception as e:
+        print(f"Restart failed: {e}")
+        
+        # Option 2: Delete and recreate
+        vm.delete()
+        vm.create()
+        vm.start()
+```
+
+## Related
+
+- [SmolVM API](/api/smolvm) - VM lifecycle methods including start() and stop()
+- [VMInfo](/api/vm-info) - Complete VM runtime information including state

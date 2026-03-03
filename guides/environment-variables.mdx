@@ -1,0 +1,473 @@
+---
+title: Environment Variables
+description: Set, list, and manage environment variables in SmolVM microVMs with persistent storage and secure injection
+---
+
+## Overview
+
+SmolVM provides a robust system for managing environment variables inside running microVMs. Variables are persisted to `/etc/profile.d/smolvm_env.sh` and automatically loaded in new login shells, making them available across SSH sessions.
+
+## Quick Start
+
+```python
+from smolvm import SmolVM
+
+with SmolVM() as vm:
+    # Set environment variables
+    vm.set_env_vars({"API_KEY": "secret-123", "DEBUG": "true"})
+    
+    # Use them in commands
+    result = vm.run("echo $API_KEY")
+    print(result.output)  # secret-123
+    
+    # List current variables
+    env_vars = vm.list_env_vars()
+    print(env_vars)  # {'API_KEY': 'secret-123', 'DEBUG': 'true'}
+    
+    # Remove variables
+    removed = vm.unset_env_vars(["DEBUG"])
+    print(removed)  # {'DEBUG': 'true'}
+```
+
+## Setting Environment Variables
+
+### Basic Usage
+
+```python
+with SmolVM() as vm:
+    # Set multiple variables
+    vm.set_env_vars({
+        "APP_ENV": "production",
+        "LOG_LEVEL": "info",
+        "MAX_WORKERS": "4"
+    })
+```
+
+### Merge vs Replace
+
+By default, `set_env_vars()` merges with existing variables:
+
+```python
+# First set
+vm.set_env_vars({"FOO": "bar", "BAZ": "qux"})
+
+# Second set (merge=True by default)
+vm.set_env_vars({"FOO": "updated", "NEW": "value"})
+
+# Result: {'FOO': 'updated', 'BAZ': 'qux', 'NEW': 'value'}
+print(vm.list_env_vars())
+```
+
+To replace all variables:
+
+```python
+# Replace entire environment
+vm.set_env_vars({"ONLY": "this"}, merge=False)
+
+# Result: {'ONLY': 'this'}
+print(vm.list_env_vars())
+```
+
+<Note>
+The `set_env_vars()` method returns a sorted list of all variable names present after the update.
+</Note>
+
+### Return Value
+
+```python
+keys = vm.set_env_vars({"KEY1": "val1", "KEY2": "val2"})
+print(keys)  # ['KEY1', 'KEY2']
+```
+
+## Boot-Time Injection
+
+Inject environment variables when creating a VM:
+
+```python
+from smolvm import SmolVM, VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+
+config = VMConfig(
+    vm_id="api-server",
+    vcpu_count=1,
+    mem_size_mib=512,
+    kernel_path=kernel,
+    rootfs_path=rootfs,
+    boot_args=SSH_BOOT_ARGS,
+    env_vars={
+        "DATABASE_URL": "postgres://localhost/mydb",
+        "API_TOKEN": "secret-token-123",
+        "ENVIRONMENT": "staging"
+    }
+)
+
+with SmolVM(config) as vm:
+    # Variables already available
+    result = vm.run("echo $DATABASE_URL")
+    print(result.output)  # postgres://localhost/mydb
+```
+
+<Warning>
+Boot-time injection requires an SSH-capable image. The VM must be booted with `init=/init` in boot args, or injection will fail.
+</Warning>
+
+## Listing Environment Variables
+
+```python
+env_vars = vm.list_env_vars()
+
+for key, value in env_vars.items():
+    print(f"{key}={value}")
+```
+
+The `list_env_vars()` method:
+- Returns a dictionary of all SmolVM-managed variables
+- Only includes variables in `/etc/profile.d/smolvm_env.sh`
+- Does not include system environment variables
+- Returns empty dict if no variables are set
+
+## Removing Environment Variables
+
+### Single Variable
+
+```python
+removed = vm.unset_env_vars(["OLD_KEY"])
+if "OLD_KEY" in removed:
+    print(f"Removed OLD_KEY with value: {removed['OLD_KEY']}")
+```
+
+### Multiple Variables
+
+```python
+removed = vm.unset_env_vars(["KEY1", "KEY2", "KEY3"])
+print(f"Removed {len(removed)} variables")
+```
+
+### Return Value
+
+```python
+# Set some variables
+vm.set_env_vars({"A": "1", "B": "2", "C": "3"})
+
+# Remove some (including a non-existent one)
+removed = vm.unset_env_vars(["A", "C", "NONEXISTENT"])
+
+# Returns only variables that actually existed
+print(removed)  # {'A': '1', 'C': '3'}
+
+# Remaining variables
+print(vm.list_env_vars())  # {'B': '2'}
+```
+
+## Variable Naming Rules
+
+Environment variable keys must be valid shell identifiers:
+
+```python
+# Valid keys
+vm.set_env_vars({
+    "API_KEY": "value",
+    "db_host": "localhost",
+    "_private": "secret",
+    "VAR123": "test"
+})
+
+# Invalid keys (will raise ValueError)
+try:
+    vm.set_env_vars({"123invalid": "value"})  # Can't start with number
+except ValueError as e:
+    print(e)  # Invalid environment variable key
+
+try:
+    vm.set_env_vars({"has-dash": "value"})  # Dashes not allowed
+except ValueError as e:
+    print(e)
+```
+
+<Accordion title="Valid identifier pattern">
+Keys must match the regex: `^[A-Za-z_][A-Za-z0-9_]*$`
+
+- Start with letter or underscore
+- Contain only letters, numbers, and underscores
+- No spaces, dashes, or special characters
+</Accordion>
+
+## Value Handling
+
+### Special Characters
+
+SmolVM automatically handles special characters in values:
+
+```python
+vm.set_env_vars({
+    "PASSWORD": "p@ssw0rd!#$%",
+    "PATH_WITH_SPACES": "/path/with spaces/file.txt",
+    "JSON_CONFIG": '{"key": "value", "nested": {"a": 1}}',
+    "QUOTES": "Value with 'single' and \"double\" quotes"
+})
+
+# All values are safely escaped and preserved
+result = vm.run("echo $PASSWORD")
+print(result.output)  # p@ssw0rd!#$%
+```
+
+### Multiline Values
+
+```python
+multiline_script = """
+#!/bin/bash
+echo "Line 1"
+echo "Line 2"
+"""
+
+vm.set_env_vars({"SCRIPT": multiline_script})
+```
+
+## Persistence and Scope
+
+### File Location
+
+Variables are stored in `/etc/profile.d/smolvm_env.sh` inside the guest:
+
+```python
+with SmolVM() as vm:
+    vm.set_env_vars({"TEST": "value"})
+    
+    # View the generated file
+    result = vm.run("cat /etc/profile.d/smolvm_env.sh")
+    print(result.output)
+    # Output:
+    # #!/bin/sh
+    # # SmolVM managed environment variables
+    #
+    # export TEST='value'
+```
+
+### When Variables Are Available
+
+Variables are loaded by:
+- Login shells (`shell="login"` mode in `vm.run()`)
+- SSH sessions (new connections)
+- Interactive shell sessions
+
+Variables are **not** loaded by:
+- Raw shell mode (`shell="raw"`)
+- Non-login shells
+- Processes started before the variables were set
+
+<CodeGroup>
+```python Login Shell (Loaded)
+vm.set_env_vars({"MY_VAR": "hello"})
+
+# Login shell loads the variable
+result = vm.run("echo $MY_VAR", shell="login")
+print(result.output)  # hello
+```
+
+```python Raw Mode (Not Loaded)
+vm.set_env_vars({"MY_VAR": "hello"})
+
+# Raw mode doesn't load profile
+result = vm.run("echo $MY_VAR", shell="raw")
+print(result.output)  # (empty)
+```
+</CodeGroup>
+
+## Real-World Examples
+
+### API Credentials
+
+```python
+import os
+from smolvm import SmolVM
+
+# Get credentials from host environment
+host_api_key = os.getenv("OPENAI_API_KEY")
+
+with SmolVM() as vm:
+    # Inject into guest
+    if host_api_key:
+        vm.set_env_vars({"OPENAI_API_KEY": host_api_key})
+    
+    # Install and run a tool that needs the API key
+    vm.run("apk add --no-cache python3 py3-pip")
+    vm.run("pip3 install openai")
+    
+    result = vm.run("""
+python3 -c '
+import os
+api_key = os.environ.get("OPENAI_API_KEY")
+print(f"API key configured: {bool(api_key)}")
+'
+""")
+    print(result.output)
+```
+
+### Application Configuration
+
+```python
+from smolvm import SmolVM, VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+
+config = VMConfig(
+    vm_id="web-app",
+    vcpu_count=2,
+    mem_size_mib=1024,
+    kernel_path=kernel,
+    rootfs_path=rootfs,
+    boot_args=SSH_BOOT_ARGS,
+    env_vars={
+        "APP_ENV": "production",
+        "LOG_LEVEL": "info",
+        "DATABASE_URL": "postgres://db.example.com/prod",
+        "REDIS_URL": "redis://cache.example.com:6379",
+        "MAX_CONNECTIONS": "100",
+        "ENABLE_FEATURE_X": "true"
+    }
+)
+
+with SmolVM(config) as vm:
+    # Deploy and run application
+    vm.run("apk add --no-cache python3 py3-pip")
+    vm.run("pip3 install flask psycopg2 redis")
+    # App reads config from environment
+```
+
+### Dynamic Configuration Updates
+
+```python
+from smolvm import SmolVM
+
+with SmolVM() as vm:
+    # Initial configuration
+    vm.set_env_vars({
+        "LOG_LEVEL": "info",
+        "CACHE_TTL": "3600"
+    })
+    
+    # Run application
+    vm.run("./start-app.sh &")
+    
+    # Later: update configuration without restart
+    vm.set_env_vars({"LOG_LEVEL": "debug"})
+    
+    # New sessions get updated config
+    result = vm.run("echo $LOG_LEVEL")
+    print(result.output)  # debug
+```
+
+### Feature Flags
+
+```python
+with SmolVM() as vm:
+    # Enable/disable features via env vars
+    vm.set_env_vars({
+        "FEATURE_NEW_UI": "enabled",
+        "FEATURE_BETA_API": "disabled",
+        "FEATURE_ANALYTICS": "enabled"
+    })
+    
+    # Application checks these at runtime
+    result = vm.run("""
+python3 -c '
+import os
+
+if os.getenv("FEATURE_NEW_UI") == "enabled":
+    print("Using new UI")
+else:
+    print("Using legacy UI")
+'
+""")
+    print(result.output)
+```
+
+## Security Considerations
+
+### Secrets Management
+
+<Warning>
+Environment variables are stored in plaintext in `/etc/profile.d/smolvm_env.sh`. For sensitive data, consider:
+- Using ephemeral VMs that are deleted after use
+- Encrypting sensitive values before injection
+- Using secret management services inside the VM
+</Warning>
+
+```python
+import base64
+
+# Example: Basic obfuscation (not encryption!)
+secret = "sensitive-api-key"
+obfuscated = base64.b64encode(secret.encode()).decode()
+
+vm.set_env_vars({"ENCODED_SECRET": obfuscated})
+
+# Decode in the guest
+result = vm.run("echo $ENCODED_SECRET | base64 -d")
+print(result.output)  # sensitive-api-key
+```
+
+### Isolation
+
+Each VM has its own isolated environment:
+
+```python
+with SmolVM() as vm1:
+    vm1.set_env_vars({"INSTANCE": "vm1"})
+
+with SmolVM() as vm2:
+    vm2.set_env_vars({"INSTANCE": "vm2"})
+    
+    # vm2 cannot see vm1's variables
+    result = vm2.run("echo $INSTANCE")
+    print(result.output)  # vm2
+```
+
+## Atomic Updates
+
+Variable updates are atomic - if the operation fails, the previous state is preserved:
+
+```python
+try:
+    vm.set_env_vars({"VALID_KEY": "value", "123invalid": "bad"})
+except ValueError:
+    print("Update failed - no changes were made")
+    
+# File is unchanged
+print(vm.list_env_vars())  # Previous state preserved
+```
+
+## Error Handling
+
+```python
+from smolvm import SmolVM
+from smolvm.exceptions import SmolVMError
+
+with SmolVM() as vm:
+    try:
+        # Invalid key
+        vm.set_env_vars({"invalid-key": "value"})
+    except ValueError as e:
+        print(f"Validation error: {e}")
+    
+    try:
+        # VM must be running
+        vm.stop()
+        vm.set_env_vars({"KEY": "value"})
+    except SmolVMError as e:
+        print(f"VM error: {e}")
+        # Error: Cannot manage environment variables: VM is stopped
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Command Execution" icon="terminal" href="/guides/command-execution">
+    Use environment variables in VM commands
+  </Card>
+  <Card title="Custom Images" icon="box" href="/guides/custom-images">
+    Build images with pre-baked environment configuration
+  </Card>
+  <Card title="AI Agent Integration" icon="robot" href="/guides/ai-agent-integration">
+    Inject API keys for AI agent tools
+  </Card>
+</CardGroup>

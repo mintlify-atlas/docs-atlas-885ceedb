@@ -1,0 +1,588 @@
+---
+title: Custom Images
+description: Build custom VM images with ImageBuilder - Alpine, Debian, SSH keys, and custom configurations
+---
+
+## Overview
+
+SmolVM's `ImageBuilder` creates custom VM images with SSH pre-configured, allowing you to build tailored environments for your workloads. It supports multiple Linux distributions, custom packages, and secure SSH key authentication.
+
+## Quick Start
+
+```python
+from smolvm import ImageBuilder, SmolVM, VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+
+# Build an Alpine Linux image with SSH
+builder = ImageBuilder()
+kernel, rootfs = builder.build_alpine_ssh(
+    name="my-image",
+    ssh_password="smolvm",
+    rootfs_size_mb=512
+)
+
+# Use the image
+config = VMConfig(
+    vm_id="my-vm",
+    kernel_path=kernel,
+    rootfs_path=rootfs,
+    boot_args=SSH_BOOT_ARGS,
+)
+
+with SmolVM(config) as vm:
+    result = vm.run("cat /etc/os-release")
+    print(result.output)
+```
+
+## ImageBuilder Basics
+
+### Initialization
+
+```python
+from smolvm import ImageBuilder
+from pathlib import Path
+
+# Use default cache directory (~/.smolvm/images/)
+builder = ImageBuilder()
+
+# Use custom cache directory
+builder = ImageBuilder(cache_dir=Path("/custom/cache/path"))
+```
+
+### Image Caching
+
+ImageBuilder caches built images to avoid rebuilding:
+
+```python
+builder = ImageBuilder()
+
+# First call: builds the image
+kernel1, rootfs1 = builder.build_alpine_ssh(name="cached-image")
+print("Built image")
+
+# Second call: returns cached image
+kernel2, rootfs2 = builder.build_alpine_ssh(name="cached-image")
+print("Used cached image")
+
+assert kernel1 == kernel2
+assert rootfs1 == rootfs2
+```
+
+<Note>
+Images are cached by name. Use unique names for different configurations.
+</Note>
+
+## Alpine Linux Images
+
+### Password Authentication
+
+Build Alpine Linux with SSH password authentication:
+
+```python
+from smolvm import ImageBuilder
+
+builder = ImageBuilder()
+kernel, rootfs = builder.build_alpine_ssh(
+    name="alpine-password",
+    ssh_password="secure-password",
+    rootfs_size_mb=512
+)
+
+print(f"Kernel: {kernel}")
+print(f"Rootfs: {rootfs}")
+# SSH with: ssh root@<guest-ip> (password: secure-password)
+```
+
+### Key-Based Authentication
+
+More secure option using SSH keys:
+
+```python
+from smolvm import ImageBuilder
+from smolvm.utils import ensure_ssh_key
+
+builder = ImageBuilder()
+
+# Generate or use existing SmolVM SSH key
+private_key, public_key = ensure_ssh_key()
+
+# Build image with key authentication
+kernel, rootfs = builder.build_alpine_ssh_key(
+    ssh_public_key=public_key,
+    name="alpine-key",
+    rootfs_size_mb=512
+)
+
+print(f"Public key: {public_key}")
+print(f"Private key: {private_key}")
+```
+
+### Using Custom SSH Keys
+
+```python
+from pathlib import Path
+
+# Read your own public key
+my_pubkey = Path("~/.ssh/id_rsa.pub").expanduser().read_text()
+
+kernel, rootfs = builder.build_alpine_ssh_key(
+    ssh_public_key=my_pubkey,
+    name="alpine-custom-key",
+    rootfs_size_mb=1024
+)
+```
+
+## Debian Linux Images
+
+Build Debian-based images for applications needing apt packages:
+
+```python
+from smolvm import ImageBuilder
+from smolvm.utils import ensure_ssh_key
+
+builder = ImageBuilder()
+private_key, public_key = ensure_ssh_key()
+
+kernel, rootfs = builder.build_debian_ssh_key(
+    ssh_public_key=public_key,
+    name="debian-dev",
+    rootfs_size_mb=2048,  # Debian needs more space
+    base_image="debian:bookworm-slim"
+)
+```
+
+<Warning>
+Debian images require more disk space (minimum 2048 MB recommended) due to larger package footprint.
+</Warning>
+
+### Custom Base Images
+
+```python
+# Use different Debian versions
+kernel, rootfs = builder.build_debian_ssh_key(
+    ssh_public_key=public_key,
+    name="debian-bullseye",
+    rootfs_size_mb=2048,
+    base_image="debian:bullseye-slim"
+)
+
+# Or Ubuntu
+kernel, rootfs = builder.build_debian_ssh_key(
+    ssh_public_key=public_key,
+    name="ubuntu-22.04",
+    rootfs_size_mb=3072,
+    base_image="ubuntu:22.04"
+)
+```
+
+## Rootfs Sizing
+
+### Choosing the Right Size
+
+```python
+builder = ImageBuilder()
+
+# Minimal Alpine (base system only)
+kernel, rootfs = builder.build_alpine_ssh_key(
+    ssh_public_key=public_key,
+    name="alpine-minimal",
+    rootfs_size_mb=256  # Minimum recommended
+)
+
+# Development environment
+kernel, rootfs = builder.build_alpine_ssh_key(
+    ssh_public_key=public_key,
+    name="alpine-dev",
+    rootfs_size_mb=1024
+)
+
+# Application server
+kernel, rootfs = builder.build_debian_ssh_key(
+    ssh_public_key=public_key,
+    name="debian-app",
+    rootfs_size_mb=4096  # Large application
+)
+```
+
+<Accordion title="Recommended sizes by use case">
+- **Minimal Alpine**: 256-512 MB
+- **Alpine with packages**: 512-1024 MB
+- **Debian base**: 2048 MB minimum
+- **Development environment**: 2048-4096 MB
+- **Application server**: 4096+ MB
+</Accordion>
+
+## Boot Arguments
+
+### SSH_BOOT_ARGS
+
+Always use `SSH_BOOT_ARGS` for SSH-capable images:
+
+```python
+from smolvm import VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+
+config = VMConfig(
+    vm_id="ssh-vm",
+    kernel_path=kernel,
+    rootfs_path=rootfs,
+    boot_args=SSH_BOOT_ARGS,  # Essential for SSH
+)
+```
+
+The `SSH_BOOT_ARGS` constant:
+```python
+# SSH_BOOT_ARGS = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/init"
+```
+
+Key components:
+- `init=/init`: Starts SmolVM's custom init script
+- `root=/dev/vda`: Sets root filesystem device
+- `rw`: Mounts root as read-write
+
+<Warning>
+Without `init=/init`, SSH will not start automatically and `vm.run()` will fail.
+</Warning>
+
+## Real-World Examples
+
+### Python Development Environment
+
+```python
+from smolvm import ImageBuilder, SmolVM, VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+from smolvm.utils import ensure_ssh_key
+
+builder = ImageBuilder()
+private_key, public_key = ensure_ssh_key()
+
+# Build Debian image with enough space for Python packages
+kernel, rootfs = builder.build_debian_ssh_key(
+    ssh_public_key=public_key,
+    name="python-dev",
+    rootfs_size_mb=3072
+)
+
+config = VMConfig(
+    vm_id="python-dev",
+    vcpu_count=2,
+    mem_size_mib=2048,
+    kernel_path=kernel,
+    rootfs_path=rootfs,
+    boot_args=SSH_BOOT_ARGS,
+)
+
+with SmolVM(config, ssh_key_path=str(private_key)) as vm:
+    # Install Python development tools
+    vm.run(
+        "apt-get update && apt-get install -y "
+        "python3 python3-pip python3-venv git",
+        timeout=180
+    )
+    
+    # Install common packages
+    vm.run("pip3 install requests flask pytest black")
+    
+    result = vm.run("python3 --version")
+    print(f"Python installed: {result.output}")
+```
+
+### Node.js Application Server
+
+```python
+from smolvm import ImageBuilder, SmolVM, VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+from smolvm.utils import ensure_ssh_key
+
+builder = ImageBuilder()
+private_key, public_key = ensure_ssh_key()
+
+# Large rootfs for Node.js and npm packages
+kernel, rootfs = builder.build_debian_ssh_key(
+    ssh_public_key=public_key,
+    name="nodejs-server",
+    rootfs_size_mb=4096
+)
+
+config = VMConfig(
+    vm_id="node-app",
+    vcpu_count=2,
+    mem_size_mib=2048,
+    kernel_path=kernel,
+    rootfs_path=rootfs,
+    boot_args=SSH_BOOT_ARGS,
+)
+
+with SmolVM(config, ssh_key_path=str(private_key)) as vm:
+    # Install Node.js 20.x
+    vm.run("apt-get update && apt-get install -y curl gnupg", timeout=120)
+    vm.run(
+        "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -",
+        timeout=120
+    )
+    vm.run("apt-get install -y nodejs", timeout=180)
+    
+    # Verify installation
+    node_version = vm.run("node --version").output
+    npm_version = vm.run("npm --version").output
+    
+    print(f"Node.js: {node_version}")
+    print(f"npm: {npm_version}")
+```
+
+### Lightweight CI Runner
+
+```python
+from smolvm import ImageBuilder, SmolVM, VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+from smolvm.utils import ensure_ssh_key
+
+builder = ImageBuilder()
+private_key, public_key = ensure_ssh_key()
+
+# Alpine for minimal resource usage
+kernel, rootfs = builder.build_alpine_ssh_key(
+    ssh_public_key=public_key,
+    name="ci-runner",
+    rootfs_size_mb=1024
+)
+
+config = VMConfig(
+    vm_id="ci-runner",
+    vcpu_count=2,
+    mem_size_mib=1024,
+    kernel_path=kernel,
+    rootfs_path=rootfs,
+    boot_args=SSH_BOOT_ARGS,
+)
+
+with SmolVM(config, ssh_key_path=str(private_key)) as vm:
+    # Install CI tools
+    vm.run("apk add --no-cache git python3 py3-pip bash make")
+    
+    # Clone and test a project
+    vm.run("git clone https://github.com/example/repo.git /workspace")
+    vm.run("cd /workspace && pip3 install -r requirements.txt")
+    
+    result = vm.run("cd /workspace && python3 -m pytest", timeout=300)
+    
+    if result.ok:
+        print("Tests passed!")
+    else:
+        print(f"Tests failed:\n{result.stderr}")
+```
+
+### Multi-Architecture Support
+
+```python
+import platform
+from smolvm import ImageBuilder
+
+builder = ImageBuilder()
+
+# Automatically builds for host architecture
+arch = platform.machine()
+print(f"Building for {arch}")
+
+kernel, rootfs = builder.build_alpine_ssh_key(
+    ssh_public_key=public_key,
+    name=f"alpine-{arch}",  # Include arch in name
+    rootfs_size_mb=512
+)
+
+# Works on both x86_64 and aarch64 (ARM)
+```
+
+## Docker Requirement
+
+ImageBuilder requires Docker to build images:
+
+```python
+from smolvm import ImageBuilder
+from smolvm.exceptions import ImageError
+
+builder = ImageBuilder()
+
+# Check Docker availability
+if not builder.check_docker():
+    print("Docker is required to build images")
+    print("Install: https://docs.docker.com/get-docker/")
+else:
+    kernel, rootfs = builder.build_alpine_ssh()
+```
+
+<Steps>
+  <Step title="Install Docker">
+    - **macOS**: Install Docker Desktop
+    - **Linux**: `sudo apt-get install docker.io`
+    - **Windows**: Install Docker Desktop with WSL2
+  </Step>
+
+  <Step title="Verify Docker access">
+    ```bash
+    docker version
+    ```
+  </Step>
+
+  <Step title="Build images">
+    ```python
+    builder = ImageBuilder()
+    kernel, rootfs = builder.build_alpine_ssh_key(public_key)
+    ```
+  </Step>
+</Steps>
+
+## Image Storage
+
+### Default Location
+
+Images are cached in `~/.smolvm/images/`:
+
+```
+~/.smolvm/images/
+├── alpine-ssh/
+│   ├── vmlinux.bin
+│   └── rootfs.ext4
+├── alpine-key/
+│   ├── vmlinux.bin
+│   └── rootfs.ext4
+└── debian-dev/
+    ├── vmlinux.bin
+    └── rootfs.ext4
+```
+
+### Custom Cache Directory
+
+```python
+from pathlib import Path
+
+builder = ImageBuilder(cache_dir=Path("/data/vm-images"))
+kernel, rootfs = builder.build_alpine_ssh_key(
+    ssh_public_key=public_key,
+    name="custom-location"
+)
+
+print(kernel)  # /data/vm-images/custom-location/vmlinux.bin
+print(rootfs)  # /data/vm-images/custom-location/rootfs.ext4
+```
+
+## Automatic Key Staleness Detection
+
+ImageBuilder rebuilds if the SSH key is newer than the cached image:
+
+```python
+from pathlib import Path
+
+pubkey_file = Path("~/.ssh/id_rsa.pub").expanduser()
+
+# First build
+kernel, rootfs = builder.build_alpine_ssh_key(
+    ssh_public_key=pubkey_file,
+    name="key-aware"
+)
+print("Built new image")
+
+# Modify public key
+pubkey_file.touch()  # Update modification time
+
+# Rebuild automatically detected
+kernel, rootfs = builder.build_alpine_ssh_key(
+    ssh_public_key=pubkey_file,
+    name="key-aware"
+)
+print("Rebuilt due to key change")
+```
+
+## Error Handling
+
+```python
+from smolvm import ImageBuilder
+from smolvm.exceptions import ImageError
+
+builder = ImageBuilder()
+
+try:
+    kernel, rootfs = builder.build_alpine_ssh_key(
+        ssh_public_key="invalid-key-format",
+        name="test"
+    )
+except ImageError as e:
+    print(f"Build failed: {e}")
+    # Invalid SSH public key format
+
+try:
+    kernel, rootfs = builder.build_alpine_ssh_key(
+        ssh_public_key=public_key,
+        rootfs_size_mb=32  # Too small
+    )
+except ValueError as e:
+    print(f"Configuration error: {e}")
+```
+
+## Advanced: Custom Kernel URLs
+
+Override the default kernel:
+
+```python
+# Use custom kernel URL
+kernel, rootfs = builder.build_alpine_ssh_key(
+    ssh_public_key=public_key,
+    name="custom-kernel",
+    kernel_url="https://example.com/custom-vmlinux.bin"
+)
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Use descriptive image names">
+    Include purpose, distro, and version in names:
+    ```python
+    builder.build_alpine_ssh_key(public_key, name="api-server-alpine-3.19")
+    ```
+  </Step>
+
+  <Step title="Size appropriately">
+    Don't over-allocate disk space:
+    ```python
+    # Minimal: 512 MB
+    # Development: 1-2 GB
+    # Production: 2-4 GB
+    ```
+  </Step>
+
+  <Step title="Use key authentication">
+    Prefer SSH keys over passwords for security:
+    ```python
+    builder.build_alpine_ssh_key(public_key)  # Preferred
+    # vs
+    builder.build_alpine_ssh(ssh_password="password")  # Less secure
+    ```
+  </Step>
+
+  <Step title="Cache strategically">
+    Reuse images across VMs with the same requirements:
+    ```python
+    # Build once
+    kernel, rootfs = builder.build_alpine_ssh_key(public_key, name="shared")
+    
+    # Use many times
+    for i in range(10):
+        config = VMConfig(vm_id=f"vm-{i}", kernel_path=kernel, rootfs_path=rootfs, ...)
+    ```
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Basic Usage" icon="rocket" href="/guides/basic-usage">
+    Use custom images with SmolVM
+  </Card>
+  <Card title="Environment Variables" icon="gear" href="/guides/environment-variables">
+    Configure images with environment variables
+  </Card>
+  <Card title="AI Agent Integration" icon="robot" href="/guides/ai-agent-integration">
+    Build specialized images for AI agents
+  </Card>
+</CardGroup>

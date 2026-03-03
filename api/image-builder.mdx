@@ -1,0 +1,356 @@
+---
+title: ImageBuilder
+description: Build custom VM images with SSH pre-configured
+---
+
+The `ImageBuilder` class provides utilities for building custom VM images with SSH access using Docker. It automatically creates minimal Linux images (Alpine or Debian) with OpenSSH configured and ready to use.
+
+## Class Definition
+
+```python
+from smolvm import ImageBuilder
+
+builder = ImageBuilder(cache_dir=None)
+```
+
+### Constructor Parameters
+
+<ParamField path="cache_dir" type="Path | None" default="~/.smolvm/images/">
+  Directory to store built images. If not specified, defaults to `~/.smolvm/images/`.
+</ParamField>
+
+## Methods
+
+### check_docker
+
+```python
+def check_docker() -> bool
+```
+
+Check if Docker is available on the system.
+
+<ResponseField name="return" type="bool">
+  Returns `True` if Docker is available, `False` otherwise.
+</ResponseField>
+
+---
+
+### build_alpine_ssh
+
+```python
+def build_alpine_ssh(
+    name: str = "alpine-ssh",
+    ssh_password: str = "smolvm",
+    rootfs_size_mb: int = 512,
+    kernel_url: str | None = None,
+) -> tuple[Path, Path]
+```
+
+Build an Alpine Linux image with SSH server and password authentication.
+
+The resulting image includes:
+- OpenSSH server configured and auto-starting
+- Root password authentication
+- Custom `/init` script that sets up networking and starts sshd
+- DNS resolution configured
+
+<Warning>
+The resulting VM **must** be booted with `boot_args` containing `init=/init` so the custom init script runs. Use the `SSH_BOOT_ARGS` constant for convenience.
+</Warning>
+
+#### Parameters
+
+<ParamField path="name" type="str" default="alpine-ssh">
+  Image name for caching. Images with the same name are reused from cache.
+</ParamField>
+
+<ParamField path="ssh_password" type="str" default="smolvm">
+  Root password for SSH authentication.
+</ParamField>
+
+<ParamField path="rootfs_size_mb" type="int" default="512">
+  Size of the root filesystem in megabytes.
+</ParamField>
+
+<ParamField path="kernel_url" type="str | None" default="None">
+  Optional kernel URL override. If not provided, uses a Firecracker-compatible kernel for the host architecture.
+</ParamField>
+
+#### Returns
+
+<ResponseField name="return" type="tuple[Path, Path]">
+  Tuple of `(kernel_path, rootfs_path)` pointing to the built image files.
+</ResponseField>
+
+#### Raises
+
+- `ImageError`: If Docker is not available or the build fails.
+
+#### Example
+
+```python
+from smolvm import ImageBuilder, SmolVM, VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+
+builder = ImageBuilder()
+kernel, rootfs = builder.build_alpine_ssh(
+    name="my-alpine-vm",
+    ssh_password="mypassword",
+    rootfs_size_mb=1024
+)
+
+config = VMConfig(
+    vm_id="my-vm",
+    kernel_path=kernel,
+    rootfs_path=rootfs,
+    boot_args=SSH_BOOT_ARGS,
+)
+
+with SmolVM(config) as vm:
+    vm.start()
+    # SSH into vm.get_ip() with root / mypassword
+```
+
+---
+
+### build_alpine_ssh_key
+
+```python
+def build_alpine_ssh_key(
+    ssh_public_key: str | Path,
+    name: str = "alpine-ssh-key",
+    rootfs_size_mb: int = 512,
+    kernel_url: str | None = None,
+) -> tuple[Path, Path]
+```
+
+Build an Alpine Linux image with key-only SSH access (no password authentication).
+
+#### Parameters
+
+<ParamField path="ssh_public_key" type="str | Path" required>
+  SSH public key content or path to a public key file. Must be in standard SSH format (starting with `ssh-`).
+</ParamField>
+
+<ParamField path="name" type="str" default="alpine-ssh-key">
+  Image name for caching.
+</ParamField>
+
+<ParamField path="rootfs_size_mb" type="int" default="512">
+  Size of the root filesystem in megabytes.
+</ParamField>
+
+<ParamField path="kernel_url" type="str | None" default="None">
+  Optional kernel URL override.
+</ParamField>
+
+#### Returns
+
+<ResponseField name="return" type="tuple[Path, Path]">
+  Tuple of `(kernel_path, rootfs_path)` pointing to the built image files.
+</ResponseField>
+
+#### Cache Invalidation
+
+If the provided SSH key file is newer than the cached image, the image will be automatically rebuilt.
+
+#### Example
+
+```python
+from pathlib import Path
+from smolvm import ImageBuilder
+
+builder = ImageBuilder()
+
+# Using a key file path
+kernel, rootfs = builder.build_alpine_ssh_key(
+    ssh_public_key=Path.home() / ".ssh" / "id_rsa.pub",
+    name="alpine-key-auth"
+)
+
+# Or using inline key content
+kernel, rootfs = builder.build_alpine_ssh_key(
+    ssh_public_key="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB..."
+)
+```
+
+---
+
+### build_debian_ssh_key
+
+```python
+def build_debian_ssh_key(
+    ssh_public_key: str | Path,
+    name: str = "debian-ssh-key",
+    rootfs_size_mb: int = 2048,
+    base_image: str = "debian:bookworm-slim",
+    kernel_url: str | None = None,
+) -> tuple[Path, Path]
+```
+
+Build a Debian Linux image with key-only SSH access.
+
+#### Parameters
+
+<ParamField path="ssh_public_key" type="str | Path" required>
+  SSH public key content or path to a public key file.
+</ParamField>
+
+<ParamField path="name" type="str" default="debian-ssh-key">
+  Image name for caching.
+</ParamField>
+
+<ParamField path="rootfs_size_mb" type="int" default="2048">
+  Size of the root filesystem in megabytes. Debian images typically need more space than Alpine.
+</ParamField>
+
+<ParamField path="base_image" type="str" default="debian:bookworm-slim">
+  Docker base image to build from. Allows customization of the Debian version.
+</ParamField>
+
+<ParamField path="kernel_url" type="str | None" default="None">
+  Optional kernel URL override.
+</ParamField>
+
+#### Returns
+
+<ResponseField name="return" type="tuple[Path, Path]">
+  Tuple of `(kernel_path, rootfs_path)` pointing to the built image files.
+</ResponseField>
+
+#### Example
+
+```python
+from smolvm import ImageBuilder
+
+builder = ImageBuilder()
+
+kernel, rootfs = builder.build_debian_ssh_key(
+    ssh_public_key="~/.ssh/id_ed25519.pub",
+    name="debian-12-vm",
+    rootfs_size_mb=3072,
+    base_image="debian:bookworm"
+)
+```
+
+---
+
+### qemu_kernel_url_for_host
+
+```python
+def qemu_kernel_url_for_host() -> str
+```
+
+Return a QEMU-compatible kernel URL for the current host architecture.
+
+This method selects the appropriate Ubuntu cloud kernel for the host's architecture (x86_64 or aarch64).
+
+<ResponseField name="return" type="str">
+  URL to a QEMU-compatible kernel binary.
+</ResponseField>
+
+## Constants
+
+### SSH_BOOT_ARGS
+
+```python
+from smolvm.build import SSH_BOOT_ARGS
+```
+
+Default boot arguments that include `init=/init` for the custom init script.
+
+**Value:**
+```python
+SSH_BOOT_ARGS = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/init"
+```
+
+<Info>
+Always use `SSH_BOOT_ARGS` when booting images built with `ImageBuilder` to ensure the SSH server starts correctly.
+</Info>
+
+#### Example
+
+```python
+from smolvm import ImageBuilder, VMConfig, SmolVM
+from smolvm.build import SSH_BOOT_ARGS
+
+builder = ImageBuilder()
+kernel, rootfs = builder.build_alpine_ssh()
+
+config = VMConfig(
+    vm_id="ssh-vm",
+    kernel_path=kernel,
+    rootfs_path=rootfs,
+    boot_args=SSH_BOOT_ARGS,  # Required for SSH to work
+)
+
+with SmolVM(config) as vm:
+    vm.start()
+```
+
+## Complete Example: Custom Image with SSH
+
+Here's a complete example showing how to build a custom image and use it with SmolVM:
+
+```python
+from pathlib import Path
+from smolvm import ImageBuilder, VM
+from smolvm.build import SSH_BOOT_ARGS
+
+# Build a custom Alpine image with SSH key authentication
+builder = ImageBuilder(cache_dir=Path("/tmp/my-images"))
+
+kernel, rootfs = builder.build_alpine_ssh_key(
+    ssh_public_key=Path.home() / ".ssh" / "id_rsa.pub",
+    name="my-secure-vm",
+    rootfs_size_mb=1024
+)
+
+print(f"Built image:")
+print(f"  Kernel: {kernel}")
+print(f"  Rootfs: {rootfs}")
+
+# Use the built image with the high-level VM API
+with VM(kernel_path=kernel, rootfs_path=rootfs, boot_args=SSH_BOOT_ARGS) as vm:
+    print(f"VM IP: {vm.get_ip()}")
+    
+    # Run commands via SSH (using the SSH key)
+    result = vm.run("uname -a")
+    print(f"Kernel: {result.stdout.strip()}")
+    
+    result = vm.run("df -h /")
+    print(f"Disk space:\n{result.stdout}")
+```
+
+## Build Process Details
+
+The `ImageBuilder` uses Docker to create VM images through the following steps:
+
+1. **Build Docker Image**: Creates a Docker image with the specified Linux distribution and SSH configuration
+2. **Export Rootfs**: Exports the container filesystem to a tar archive
+3. **Create ext4 Filesystem**: 
+   - On Linux: Uses `mkfs.ext4` and loop devices (via privileged helper)
+   - On macOS: Uses Docker with `mke2fs` to create the ext4 image
+4. **Download Kernel**: Fetches a Firecracker-compatible kernel for the host architecture
+
+Images are cached by name, so rebuilding the same image name will reuse the cached version unless the cache is stale.
+
+## Error Handling
+
+All build methods raise `ImageError` when:
+- Docker is not available
+- The build process fails
+- Invalid SSH public key format is provided
+- Filesystem creation fails
+- Kernel download fails
+
+```python
+from smolvm import ImageBuilder
+from smolvm.exceptions import ImageError
+
+try:
+    builder = ImageBuilder()
+    kernel, rootfs = builder.build_alpine_ssh()
+except ImageError as e:
+    print(f"Build failed: {e}")
+```

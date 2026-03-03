@@ -1,0 +1,223 @@
+---
+title: "VMConfig"
+description: "Configuration dataclass for creating a microVM"
+---
+
+## Overview
+
+`VMConfig` is a Pydantic model that defines the configuration for creating a microVM. It includes hardware specifications, filesystem paths, boot parameters, and runtime options.
+
+## Schema
+
+```python
+class VMConfig(BaseModel):
+    vm_id: str
+    vcpu_count: int = 2
+    mem_size_mib: int = 512
+    kernel_path: Path
+    rootfs_path: Path
+    boot_args: str = "console=ttyS0 reboot=k panic=1 pci=off"
+    backend: str | None = None
+    disk_mode: Literal["isolated", "shared"] = "isolated"
+    retain_disk_on_delete: bool = False
+    env_vars: dict[str, str] = {}
+```
+
+## Attributes
+
+<ResponseField name="vm_id" type="str" required>
+  Unique identifier for the VM. Must be lowercase alphanumeric with hyphens, matching pattern: `^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$` or `^[a-z0-9]$`.
+  
+  If omitted, SmolVM auto-generates one in the format `vm-{uuid_hex[:8]}`.
+</ResponseField>
+
+<ResponseField name="vcpu_count" type="int" default="2">
+  Number of virtual CPUs. Valid range: 1-32.
+</ResponseField>
+
+<ResponseField name="mem_size_mib" type="int" default="512">
+  Memory size in MiB. Valid range: 128-16384.
+</ResponseField>
+
+<ResponseField name="kernel_path" type="Path" required>
+  Path to the kernel image. Must exist and be a file.
+</ResponseField>
+
+<ResponseField name="rootfs_path" type="Path" required>
+  Path to the root filesystem image. Must exist and be a file.
+</ResponseField>
+
+<ResponseField name="boot_args" type="str" default="console=ttyS0 reboot=k panic=1 pci=off">
+  Kernel boot arguments. For SSH-capable VMs, include `init=/init`.
+</ResponseField>
+
+<ResponseField name="backend" type="str | None" default="None">
+  Optional runtime backend override: `"firecracker"` or `"qemu"`. If omitted, uses the manager's default backend.
+</ResponseField>
+
+<ResponseField name="disk_mode" type="Literal['isolated', 'shared']" default="isolated">
+  Disk lifecycle mode:
+  - `"isolated"` (default): clone `rootfs_path` per VM for sandbox isolation
+  - `"shared"`: boot directly from `rootfs_path` (changes persist to source image)
+</ResponseField>
+
+<ResponseField name="retain_disk_on_delete" type="bool" default="False">
+  Keep isolated VM disk after delete, so a later create with the same VM ID can reuse prior state. Only applies when `disk_mode="isolated"`.
+</ResponseField>
+
+<ResponseField name="env_vars" type="dict[str, str]" default="{}">
+  Environment variables to inject into the guest after boot via SSH. Keys must be valid shell identifiers (matching pattern `^[A-Za-z_][A-Za-z0-9_]*$`).
+  
+  Requires an SSH-capable image with `init=/init` in `boot_args`.
+</ResponseField>
+
+## Validation
+
+### Path Validation
+
+Both `kernel_path` and `rootfs_path` are validated at creation time:
+- Path must exist on the filesystem
+- Path must be a file (not a directory)
+
+```python Example Error
+config = VMConfig(
+    kernel_path=Path("/nonexistent/kernel"),
+    rootfs_path=Path("/valid/rootfs.ext4"),
+)
+# Raises: ValueError: Path does not exist: /nonexistent/kernel
+```
+
+### VM ID Validation
+
+The `vm_id` must match the pattern for valid identifiers:
+- Lowercase letters, numbers, and hyphens only
+- Must start and end with alphanumeric character
+- 1-64 characters in length
+
+```python Valid Examples
+VMConfig(vm_id="my-vm", ...)           # ✓
+VMConfig(vm_id="vm-123", ...)          # ✓
+VMConfig(vm_id="a", ...)               # ✓
+```
+
+```python Invalid Examples
+VMConfig(vm_id="My-VM", ...)           # ✗ uppercase
+VMConfig(vm_id="-vm", ...)             # ✗ starts with hyphen
+VMConfig(vm_id="vm_123", ...)          # ✗ underscore not allowed
+```
+
+### Environment Variable Validation
+
+Environment variable keys are validated as shell identifiers:
+- Must start with letter or underscore
+- Can contain letters, numbers, and underscores
+- Case-sensitive
+
+```python Example
+config = VMConfig(
+    vm_id="test",
+    kernel_path=Path("/kernel"),
+    rootfs_path=Path("/rootfs.ext4"),
+    env_vars={
+        "API_KEY": "secret123",      # ✓ valid
+        "_DEBUG": "1",                # ✓ valid
+        "PATH": "/usr/bin",           # ✓ valid
+        "123_VAR": "value",           # ✗ starts with number
+    },
+)
+# Raises: ValueError for invalid key
+```
+
+## Examples
+
+<CodeGroup>
+```python Minimal Config
+from smolvm.types import VMConfig
+from pathlib import Path
+
+config = VMConfig(
+    kernel_path=Path("/path/to/vmlinux"),
+    rootfs_path=Path("/path/to/rootfs.ext4"),
+)
+# Auto-generated vm_id, 2 vCPUs, 512 MiB RAM, isolated disk
+```
+
+```python Full Config
+from smolvm.types import VMConfig
+from pathlib import Path
+
+config = VMConfig(
+    vm_id="production-worker-1",
+    vcpu_count=4,
+    mem_size_mib=2048,
+    kernel_path=Path("/images/vmlinux-5.10"),
+    rootfs_path=Path("/images/alpine-python.ext4"),
+    boot_args="console=ttyS0 reboot=k panic=1 init=/init",
+    backend="firecracker",
+    disk_mode="isolated",
+    retain_disk_on_delete=False,
+    env_vars={
+        "API_URL": "https://api.example.com",
+        "WORKER_ID": "worker-1",
+    },
+)
+```
+
+```python SSH-Ready VM
+from smolvm.types import VMConfig
+from pathlib import Path
+
+config = VMConfig(
+    vm_id="ssh-vm",
+    kernel_path=Path("/images/vmlinux"),
+    rootfs_path=Path("/images/alpine-ssh.ext4"),
+    boot_args="console=ttyS0 reboot=k panic=1 init=/init",  # init=/init enables SSH
+    env_vars={
+        "GREETING": "Hello from SmolVM",
+    },
+)
+```
+
+```python Shared Disk Mode
+from smolvm.types import VMConfig
+from pathlib import Path
+
+# Use shared mode when you want changes to persist to source image
+config = VMConfig(
+    vm_id="persistent-vm",
+    kernel_path=Path("/images/vmlinux"),
+    rootfs_path=Path("/images/stateful.ext4"),
+    disk_mode="shared",  # Changes written directly to /images/stateful.ext4
+)
+```
+</CodeGroup>
+
+## Immutability
+
+`VMConfig` is frozen (immutable) after creation. To modify a config, use `model_copy()` with updates:
+
+```python
+original = VMConfig(
+    kernel_path=Path("/kernel"),
+    rootfs_path=Path("/rootfs.ext4"),
+)
+
+# Create a modified copy
+modified = original.model_copy(update={"vcpu_count": 4, "mem_size_mib": 1024})
+```
+
+## Type Annotations
+
+For type checking with mypy or similar tools:
+
+```python
+from smolvm.types import VMConfig
+from pathlib import Path
+
+def create_test_vm(kernel: Path, rootfs: Path) -> VMConfig:
+    return VMConfig(
+        vm_id="test",
+        kernel_path=kernel,
+        rootfs_path=rootfs,
+    )
+```

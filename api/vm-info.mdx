@@ -1,0 +1,236 @@
+---
+title: "VMInfo"
+description: "Runtime information dataclass for a running or stopped VM"
+---
+
+## Overview
+
+`VMInfo` is a Pydantic model that contains runtime information about a VM, including its current state, configuration, network details, and process information.
+
+## Schema
+
+```python
+class VMInfo(BaseModel):
+    vm_id: str
+    status: VMState
+    config: VMConfig
+    network: NetworkConfig | None = None
+    pid: int | None = None
+    socket_path: Path | None = None
+```
+
+## Attributes
+
+<ResponseField name="vm_id" type="str" required>
+  The VM identifier.
+</ResponseField>
+
+<ResponseField name="status" type="VMState" required>
+  Current lifecycle state. One of:
+  - `VMState.CREATED`: VM created but not started
+  - `VMState.RUNNING`: VM is running
+  - `VMState.STOPPED`: VM has been stopped
+  - `VMState.ERROR`: VM is in an error state
+</ResponseField>
+
+<ResponseField name="config" type="VMConfig" required>
+  The VM configuration used to create this VM.
+</ResponseField>
+
+<ResponseField name="network" type="NetworkConfig | None" default="None">
+  Network configuration for the VM. `None` if networking is not configured.
+  
+  Contains:
+  - `guest_ip`: IP address assigned to the guest
+  - `gateway_ip`: Gateway IP (host side of TAP)
+  - `netmask`: Network mask
+  - `tap_device`: Name of the TAP device
+  - `guest_mac`: MAC address for the guest interface
+  - `ssh_host_port`: Optional host TCP port forwarded to guest SSH (22)
+</ResponseField>
+
+<ResponseField name="pid" type="int | None" default="None">
+  Process ID of the VM runtime process (Firecracker or QEMU). `None` when VM is not running.
+</ResponseField>
+
+<ResponseField name="socket_path" type="Path | None" default="None">
+  Path to the Firecracker API socket. `None` for QEMU backend or when VM is not running.
+</ResponseField>
+
+## VMState Enum
+
+The `VMState` enum represents the VM lifecycle:
+
+```python
+class VMState(str, Enum):
+    CREATED = "created"
+    RUNNING = "running"
+    STOPPED = "stopped"
+    ERROR = "error"
+```
+
+### State Transitions
+
+```
+CREATED ──start()──> RUNNING ──stop()──> STOPPED
+   │                    │                    │
+   │                    │                    │
+   └────────────────────┴────────────────────┴──> ERROR (on failure)
+```
+
+## NetworkConfig Details
+
+When `network` is present, it contains the following fields:
+
+<ResponseField name="network.guest_ip" type="str">
+  IP address assigned to the guest (e.g., `"172.16.0.10"` for Firecracker, `"10.0.2.15"` for QEMU).
+</ResponseField>
+
+<ResponseField name="network.gateway_ip" type="str" default="172.16.0.1">
+  Gateway IP address (host side of TAP).
+</ResponseField>
+
+<ResponseField name="network.netmask" type="str" default="255.255.255.0">
+  Network mask.
+</ResponseField>
+
+<ResponseField name="network.tap_device" type="str">
+  Name of the TAP device (e.g., `"tap10"`) or `"usernet"` for QEMU user networking.
+</ResponseField>
+
+<ResponseField name="network.guest_mac" type="str">
+  MAC address for the guest interface (e.g., `"02:FC:00:00:00:0A"`).
+</ResponseField>
+
+<ResponseField name="network.ssh_host_port" type="int | None">
+  Host TCP port forwarded to guest SSH port 22. Used for `ssh -p <port> user@localhost`.
+</ResponseField>
+
+## Examples
+
+<CodeGroup>
+```python Access VM Information
+from smolvm import SmolVM
+
+with SmolVM() as vm:
+    info = vm.info
+    
+    print(f"VM ID: {info.vm_id}")
+    print(f"Status: {info.status.value}")
+    print(f"vCPUs: {info.config.vcpu_count}")
+    print(f"Memory: {info.config.mem_size_mib} MiB")
+    
+    if info.network:
+        print(f"Guest IP: {info.network.guest_ip}")
+        print(f"SSH Port: {info.network.ssh_host_port}")
+    
+    if info.pid:
+        print(f"Process ID: {info.pid}")
+```
+
+```python Check VM State
+from smolvm.vm import SmolVMManager
+from smolvm.types import VMState
+
+sdk = SmolVMManager()
+info = sdk.get("my-vm")
+
+if info.status == VMState.RUNNING:
+    print(f"VM is running (PID: {info.pid})")
+elif info.status == VMState.STOPPED:
+    print("VM is stopped")
+elif info.status == VMState.ERROR:
+    print("VM is in error state")
+```
+
+```python List All VMs
+from smolvm.vm import SmolVMManager
+
+sdk = SmolVMManager()
+vms = sdk.list_vms()
+
+for vm_info in vms:
+    network_info = "No network"
+    if vm_info.network:
+        network_info = f"{vm_info.network.guest_ip}:{vm_info.network.ssh_host_port}"
+    
+    print(f"{vm_info.vm_id:<20} {vm_info.status.value:<10} {network_info}")
+```
+
+```python Filter by State
+from smolvm.vm import SmolVMManager
+from smolvm.types import VMState
+
+sdk = SmolVMManager()
+
+# Get only running VMs
+running_vms = sdk.list_vms(status=VMState.RUNNING)
+print(f"Running VMs: {len(running_vms)}")
+
+for vm in running_vms:
+    print(f"  - {vm.vm_id} at {vm.network.guest_ip}")
+```
+</CodeGroup>
+
+## Immutability
+
+`VMInfo` is frozen (immutable) after creation. The state is managed internally by `SmolVMManager` or `SmolVM`.
+
+To get updated information, call:
+- `SmolVM.refresh()` (updates cached info)
+- `SmolVMManager.get(vm_id)` (queries state from database)
+
+```python
+from smolvm import SmolVM
+
+vm = SmolVM()
+vm.start()
+
+# Cached info
+print(vm.info.status)  # VMState.RUNNING
+
+# In another process, VM might have changed
+vm.refresh()  # Refresh from state store
+print(vm.info.status)  # Updated status
+```
+
+## Type Annotations
+
+For type checking:
+
+```python
+from smolvm.types import VMInfo, VMState
+from smolvm.vm import SmolVMManager
+
+def get_running_vm_ips(sdk: SmolVMManager) -> list[str]:
+    """Get IPs of all running VMs."""
+    running: list[VMInfo] = sdk.list_vms(status=VMState.RUNNING)
+    ips: list[str] = []
+    
+    for vm in running:
+        if vm.network:
+            ips.append(vm.network.guest_ip)
+    
+    return ips
+```
+
+## Accessing Nested Configuration
+
+Since `VMInfo` contains the full `VMConfig`, you can access all configuration details:
+
+```python
+info = sdk.get("my-vm")
+
+# Access config attributes
+print(f"Kernel: {info.config.kernel_path}")
+print(f"Rootfs: {info.config.rootfs_path}")
+print(f"Boot args: {info.config.boot_args}")
+print(f"Disk mode: {info.config.disk_mode}")
+print(f"Backend: {info.config.backend}")
+
+# Check for environment variables
+if info.config.env_vars:
+    print("Environment variables:")
+    for key, value in info.config.env_vars.items():
+        print(f"  {key}={value}")
+```

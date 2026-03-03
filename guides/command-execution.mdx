@@ -1,0 +1,418 @@
+---
+title: Command Execution
+description: Execute commands inside SmolVM microVMs via SSH with different shell modes and error handling
+---
+
+## Overview
+
+SmolVM provides seamless command execution inside microVMs via SSH. The `run()` method handles SSH connection management automatically, supporting both login shell and raw execution modes.
+
+## Basic Command Execution
+
+The simplest way to run commands:
+
+```python
+from smolvm import SmolVM
+
+with SmolVM() as vm:
+    result = vm.run("echo 'Hello from SmolVM'")
+    print(result.stdout.strip())
+    # Output: Hello from SmolVM
+```
+
+### CommandResult Object
+
+Every `run()` call returns a `CommandResult` with:
+
+```python
+result = vm.run("ls -la /tmp")
+
+# Exit code (0 = success)
+print(result.exit_code)  # 0
+
+# Standard output
+print(result.stdout)
+
+# Standard error
+print(result.stderr)
+
+# Convenience properties
+print(result.ok)      # True if exit_code == 0
+print(result.output)  # Stripped stdout
+```
+
+<CodeGroup>
+```python Success Case
+result = vm.run("whoami")
+if result.ok:
+    print(f"Current user: {result.output}")
+    # Output: Current user: root
+```
+
+```python Failure Case
+result = vm.run("cat /nonexistent")
+if not result.ok:
+    print(f"Error: {result.stderr}")
+    print(f"Exit code: {result.exit_code}")
+```
+</CodeGroup>
+
+## Shell Modes
+
+SmolVM supports two execution modes controlled by the `shell` parameter:
+
+### Login Shell Mode (Default)
+
+Runs commands through the guest's login shell, loading profile and environment:
+
+```python
+# Uses login shell - env vars from /etc/profile.d/ are loaded
+result = vm.run("echo $PATH", shell="login")
+```
+
+This mode:
+- Sources `/etc/profile` and user profile scripts
+- Loads environment variables from `/etc/profile.d/smolvm_env.sh`
+- Best for commands that need full shell environment
+- **Default behavior** when `shell` parameter is omitted
+
+### Raw Mode
+
+Executes commands directly without shell wrapping:
+
+```python
+# Direct execution - no shell environment loading
+result = vm.run("hostname", shell="raw")
+```
+
+Raw mode:
+- Skips profile loading
+- Faster execution
+- Useful for simple commands that don't need environment
+- Required for non-shell binaries
+
+<CodeGroup>
+```python Login Shell
+from smolvm import SmolVM
+
+with SmolVM() as vm:
+    # Set environment variable
+    vm.set_env_vars({"API_KEY": "secret-123"})
+    
+    # Login shell loads the env var
+    result = vm.run("echo $API_KEY", shell="login")
+    print(result.output)  # secret-123
+```
+
+```python Raw Mode
+from smolvm import SmolVM
+
+with SmolVM() as vm:
+    vm.set_env_vars({"API_KEY": "secret-123"})
+    
+    # Raw mode doesn't load env vars
+    result = vm.run("echo $API_KEY", shell="raw")
+    print(result.output)  # (empty or undefined)
+```
+</CodeGroup>
+
+## Timeout Handling
+
+Control execution timeout with the `timeout` parameter (in seconds):
+
+```python
+from smolvm.exceptions import OperationTimeoutError
+
+try:
+    # Long-running command with 60s timeout
+    result = vm.run(
+        "apt-get update && apt-get install -y curl",
+        timeout=60
+    )
+except OperationTimeoutError as e:
+    print(f"Command timed out: {e.message}")
+```
+
+<Note>
+Default timeout is 30 seconds. Adjust based on expected command duration.
+</Note>
+
+## Error Handling Patterns
+
+### Check Exit Codes
+
+```python
+result = vm.run("./install.sh")
+if not result.ok:
+    raise RuntimeError(
+        f"Installation failed (exit {result.exit_code}): {result.stderr}"
+    )
+```
+
+### Handle SSH Unavailability
+
+```python
+from smolvm.exceptions import CommandExecutionUnavailableError
+
+try:
+    result = vm.run("whoami")
+except CommandExecutionUnavailableError as e:
+    print(f"SSH not available: {e.message}")
+    print(f"Remediation: {e.remediation}")
+```
+
+<Warning>
+Commands can only run on VMs with SSH support. Auto-configured VMs and images built with `ImageBuilder` include SSH by default.
+</Warning>
+
+### Comprehensive Error Handling
+
+```python
+from smolvm import SmolVM
+from smolvm.exceptions import (
+    SmolVMError,
+    CommandExecutionUnavailableError,
+    OperationTimeoutError
+)
+
+with SmolVM() as vm:
+    try:
+        result = vm.run("complex-command", timeout=30)
+        
+        if not result.ok:
+            print(f"Command failed with exit code {result.exit_code}")
+            print(f"stderr: {result.stderr}")
+            # Decide how to handle based on exit code
+            
+    except OperationTimeoutError:
+        print("Command exceeded 30 second timeout")
+    except CommandExecutionUnavailableError as e:
+        print(f"SSH not ready: {e.remediation}")
+    except SmolVMError as e:
+        print(f"VM error: {e}")
+```
+
+## Multi-Step Commands
+
+### Sequential Commands
+
+```python
+# Run commands in sequence
+vm.run("apt-get update")
+vm.run("apt-get install -y python3-pip")
+vm.run("pip3 install requests")
+```
+
+### Chained Commands
+
+```python
+# Chain with && for atomic operations
+result = vm.run(
+    "apt-get update && "
+    "apt-get install -y python3-pip && "
+    "pip3 install requests",
+    timeout=120
+)
+```
+
+### Multi-line Scripts
+
+```python
+script = """
+set -e  # Exit on error
+apt-get update
+apt-get install -y curl jq
+curl -s https://api.example.com | jq '.data'
+"""
+
+result = vm.run(script, timeout=60)
+if result.ok:
+    print("Script completed successfully")
+```
+
+## Real-World Examples
+
+### Installing Software
+
+```python
+from smolvm import SmolVM
+
+with SmolVM(mem_size_mib=1024) as vm:
+    # Update package lists
+    vm.run("apk update", timeout=30)
+    
+    # Install packages
+    result = vm.run("apk add --no-cache python3 py3-pip", timeout=60)
+    if not result.ok:
+        raise RuntimeError(f"Failed to install packages: {result.stderr}")
+    
+    # Verify installation
+    result = vm.run("python3 --version")
+    print(f"Installed: {result.output}")
+```
+
+### Running Python Code
+
+```python
+with SmolVM() as vm:
+    # Install dependencies
+    vm.run("apk add --no-cache python3 py3-pip")
+    
+    # Run inline Python
+    python_code = '''
+import sys
+import platform
+print(f"Python {sys.version}")
+print(f"Platform: {platform.system()}")
+'''
+    
+    result = vm.run(f"python3 -c '{python_code}'")
+    print(result.output)
+```
+
+### File Operations
+
+```python
+with SmolVM() as vm:
+    # Create directory
+    vm.run("mkdir -p /app/data")
+    
+    # Write file
+    vm.run("echo 'Hello World' > /app/data/test.txt")
+    
+    # Read file
+    result = vm.run("cat /app/data/test.txt")
+    print(result.output)  # Hello World
+    
+    # Check file exists
+    result = vm.run("test -f /app/data/test.txt && echo 'exists'")
+    print(result.output)  # exists
+```
+
+### Network Operations
+
+```python
+with SmolVM() as vm:
+    # Install curl
+    vm.run("apk add --no-cache curl")
+    
+    # Test connectivity
+    result = vm.run("curl -s https://api.github.com/zen", timeout=10)
+    if result.ok:
+        print(f"GitHub says: {result.output}")
+    
+    # Download file
+    vm.run(
+        "curl -L -o /tmp/data.json https://api.example.com/data",
+        timeout=30
+    )
+```
+
+## SSH Connection Management
+
+SmolVM handles SSH connections automatically:
+
+1. **Lazy Connection**: SSH client is created on first `run()` call
+2. **Connection Reuse**: Same SSH client is reused for all commands
+3. **Automatic Reconnection**: Handles connection failures gracefully
+4. **Cleanup**: Connections are closed when VM stops or context exits
+
+### Waiting for SSH
+
+For custom boot sequences, explicitly wait for SSH:
+
+```python
+vm = SmolVM(config)
+vm.start()
+
+# Wait up to 60 seconds for SSH to be ready
+vm.wait_for_ssh(timeout=60.0)
+
+# Now safe to run commands
+result = vm.run("hostname")
+```
+
+## SSH Commands for External Tools
+
+Get ready-to-run SSH command strings:
+
+```python
+with SmolVM() as vm:
+    commands = vm.ssh_commands(
+        ssh_user="root",
+        key_path="~/.smolvm/keys/id_ed25519"
+    )
+    
+    print(commands["ssh"])
+    # ssh -i ~/.smolvm/keys/id_ed25519 root@172.16.0.2
+    
+    print(commands["scp_to_guest"])
+    # scp -i ~/.smolvm/keys/id_ed25519 <local> root@172.16.0.2:<remote>
+```
+
+## Checking Command Capability
+
+Before running commands, verify SSH support:
+
+```python
+if vm.can_run_commands():
+    result = vm.run("whoami")
+else:
+    print("This VM doesn't support command execution")
+    print("Rebuild with SSH_BOOT_ARGS or use SmolVM() auto-config")
+```
+
+<Accordion title="When is command execution unavailable?">
+Command execution requires:
+- VM booted with `init=/init` in boot args
+- SSH server running in the guest
+- Network connectivity
+
+Auto-configured VMs and `ImageBuilder` images have SSH by default. Custom images without SSH support cannot execute commands.
+</Accordion>
+
+## Performance Tips
+
+<Steps>
+  <Step title="Batch related commands">
+    Chain commands with `&&` instead of multiple `run()` calls:
+    ```python
+    # Faster: single SSH session
+    vm.run("cmd1 && cmd2 && cmd3")
+    
+    # Slower: three SSH sessions
+    vm.run("cmd1")
+    vm.run("cmd2")
+    vm.run("cmd3")
+    ```
+  </Step>
+
+  <Step title="Use raw mode when possible">
+    Skip shell initialization for simple commands:
+    ```python
+    vm.run("hostname", shell="raw")  # Faster
+    ```
+  </Step>
+
+  <Step title="Set appropriate timeouts">
+    Don't use unnecessarily long timeouts:
+    ```python
+    vm.run("echo hi", timeout=5)  # Quick command
+    vm.run("apt-get update", timeout=60)  # Longer operation
+    ```
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Environment Variables" icon="gear" href="/guides/environment-variables">
+    Manage persistent environment variables for commands
+  </Card>
+  <Card title="Port Forwarding" icon="network-wired" href="/guides/port-forwarding">
+    Expose guest services to the host
+  </Card>
+  <Card title="AI Agent Integration" icon="robot" href="/guides/ai-agent-integration">
+    Use command execution for AI agent tools
+  </Card>
+</CardGroup>

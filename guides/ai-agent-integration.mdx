@@ -1,0 +1,624 @@
+---
+title: AI Agent Integration
+description: Integration patterns for using SmolVM as a secure sandbox for AI agents - tool calling, long-running environments, and safety
+---
+
+## Overview
+
+SmolVM is specifically designed to provide secure execution environments for AI agents. When an LLM generates code or performs system operations, SmolVM provides hardware-level isolation using Firecracker microVMs, making it significantly safer than Docker or native execution.
+
+## Why SmolVM for AI Agents?
+
+<CardGroup cols={2}>
+  <Card title="Hardware Isolation" icon="shield">
+    Firecracker microVMs use KVM hardware virtualization, making escape attacks exponentially harder than container-based isolation
+  </Card>
+  <Card title="Controlled Networking" icon="network-wired">
+    Fine-grained network control lets you restrict or monitor agent internet access
+  </Card>
+  <Card title="Ephemeral by Default" icon="clock">
+    Spin up fresh VMs for each task and destroy immediately - no persistent side effects
+  </Card>
+  <Card title="Resource Limits" icon="gauge">
+    Strict CPU and memory limits prevent resource exhaustion attacks
+  </Card>
+</CardGroup>
+
+## Integration Pattern 1: Tool/Function Calling
+
+Wrap SmolVM as a tool for your AI agent to execute code safely.
+
+### Basic Code Execution Tool
+
+```python
+from smolvm import SmolVM
+
+def execute_code_in_sandbox(code: str, language: str = "python") -> str:
+    """Tool for the agent to run code safely in an isolated environment.
+    
+    Args:
+        code: The code to execute
+        language: Programming language (python, bash, javascript)
+    
+    Returns:
+        Output from code execution or error message
+    """
+    with SmolVM() as vm:
+        # Install runtime if needed
+        if language == "python":
+            vm.run("apk add --no-cache python3")
+            result = vm.run(f"python3 -c '{code}'")
+        elif language == "javascript":
+            vm.run("apk add --no-cache nodejs")
+            vm.run(f"cat > /tmp/script.js << 'EOF'\n{code}\nEOF")
+            result = vm.run("node /tmp/script.js")
+        elif language == "bash":
+            result = vm.run(code)
+        else:
+            return f"Unsupported language: {language}"
+        
+        if result.ok:
+            return result.stdout
+        else:
+            return f"Error (exit {result.exit_code}):\n{result.stderr}"
+
+# Example usage with an LLM agent
+code_to_run = """
+import sys
+print(f"Python version: {sys.version}")
+print(f"Hello from isolated VM!")
+"""
+
+output = execute_code_in_sandbox(code_to_run, language="python")
+print(output)
+```
+
+### File System Operations Tool
+
+```python
+from smolvm import SmolVM
+from typing import Dict, Any
+
+class FileSystemTool:
+    """Safe file system operations for AI agents."""
+    
+    def __init__(self):
+        self.vm = SmolVM()
+        self.vm.start()
+    
+    def read_file(self, path: str) -> str:
+        """Read a file from the sandbox."""
+        result = self.vm.run(f"cat {path}")
+        if not result.ok:
+            raise FileNotFoundError(f"Cannot read {path}: {result.stderr}")
+        return result.stdout
+    
+    def write_file(self, path: str, content: str) -> bool:
+        """Write content to a file in the sandbox."""
+        # Escape content safely
+        result = self.vm.run(f"cat > {path} << 'EOF'\n{content}\nEOF")
+        return result.ok
+    
+    def list_directory(self, path: str = "/tmp") -> list[str]:
+        """List files in a directory."""
+        result = self.vm.run(f"ls -1 {path}")
+        if not result.ok:
+            return []
+        return [f.strip() for f in result.stdout.split('\n') if f.strip()]
+    
+    def cleanup(self):
+        """Clean up the VM."""
+        self.vm.delete()
+        self.vm.close()
+
+# Usage
+fs = FileSystemTool()
+try:
+    fs.write_file("/tmp/data.txt", "Agent-generated content")
+    content = fs.read_file("/tmp/data.txt")
+    print(f"Content: {content}")
+    
+    files = fs.list_directory("/tmp")
+    print(f"Files: {files}")
+finally:
+    fs.cleanup()
+```
+
+### Web Scraping Tool
+
+```python
+from smolvm import SmolVM
+
+def safe_web_fetch(url: str, max_size_kb: int = 100) -> str:
+    """Fetch web content safely in an isolated environment.
+    
+    Args:
+        url: URL to fetch
+        max_size_kb: Maximum response size in KB
+    
+    Returns:
+        Response body or error message
+    """
+    with SmolVM() as vm:
+        # Install curl
+        vm.run("apk add --no-cache curl")
+        
+        # Fetch with size limit
+        result = vm.run(
+            f"curl -sS -L --max-filesize {max_size_kb * 1024} '{url}'",
+            timeout=30
+        )
+        
+        if result.ok:
+            return result.stdout
+        else:
+            return f"Failed to fetch {url}: {result.stderr}"
+
+# Agent uses this to fetch data
+html = safe_web_fetch("https://api.github.com/zen")
+print(html)
+```
+
+## Integration Pattern 2: Long-Running Agent Environments
+
+For agents that need persistent state across multiple turns:
+
+```python
+from smolvm import SmolVM, VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+from smolvm.utils import ensure_ssh_key
+import os
+
+class AgentEnvironment:
+    """Persistent sandbox environment for an AI agent."""
+    
+    def __init__(self, agent_id: str, api_key: str | None = None):
+        self.agent_id = agent_id
+        self.vm_id = f"agent-env-{agent_id}"
+        
+        # Try to reconnect to existing environment
+        try:
+            self.vm = SmolVM.from_id(self.vm_id)
+            print(f"Reconnected to existing environment: {self.vm_id}")
+        except Exception:
+            # Create new environment
+            print(f"Creating new environment: {self.vm_id}")
+            private_key, public_key = ensure_ssh_key()
+            
+            from smolvm import ImageBuilder
+            builder = ImageBuilder()
+            kernel, rootfs = builder.build_alpine_ssh_key(
+                ssh_public_key=public_key,
+                name="agent-env",
+                rootfs_size_mb=2048
+            )
+            
+            env_vars = {}
+            if api_key:
+                env_vars["OPENAI_API_KEY"] = api_key
+            
+            config = VMConfig(
+                vm_id=self.vm_id,
+                vcpu_count=2,
+                mem_size_mib=1024,
+                kernel_path=kernel,
+                rootfs_path=rootfs,
+                boot_args=SSH_BOOT_ARGS,
+                env_vars=env_vars,
+            )
+            
+            self.vm = SmolVM(config, ssh_key_path=str(private_key))
+        
+        self.vm.start()
+        self._setup_workspace()
+    
+    def _setup_workspace(self):
+        """Initialize agent workspace."""
+        self.vm.run("mkdir -p /workspace")
+        self.vm.run("apk add --no-cache python3 py3-pip git curl")
+    
+    def execute(self, command: str, timeout: int = 60) -> dict:
+        """Execute a command in the agent environment."""
+        result = self.vm.run(f"cd /workspace && {command}", timeout=timeout)
+        return {
+            "success": result.ok,
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+    
+    def install_package(self, package: str) -> bool:
+        """Install a Python package."""
+        result = self.vm.run(f"pip3 install {package}", timeout=120)
+        return result.ok
+    
+    def persist(self):
+        """Stop the environment but keep it for later."""
+        self.vm.stop()
+        self.vm.close()
+    
+    def destroy(self):
+        """Permanently delete the environment."""
+        self.vm.delete()
+        self.vm.close()
+
+# Usage in agent loop
+api_key = os.getenv("OPENAI_API_KEY")
+env = AgentEnvironment(agent_id="assistant-1", api_key=api_key)
+
+try:
+    # Agent turn 1: Install dependencies
+    env.install_package("requests")
+    result1 = env.execute("python3 -c 'import requests; print(requests.__version__)'")
+    print(f"Turn 1: {result1['stdout']}")
+    
+    # Agent turn 2: Write a script
+    env.execute("echo 'print(\"Hello\")' > script.py")
+    result2 = env.execute("python3 script.py")
+    print(f"Turn 2: {result2['stdout']}")
+    
+    # Persist for next conversation
+    env.persist()
+    
+    # Later: Resume
+    env2 = AgentEnvironment(agent_id="assistant-1")
+    result3 = env2.execute("ls -la")
+    print(f"Resumed: {result3['stdout']}")
+    
+finally:
+    env.destroy()
+```
+
+## Integration Pattern 3: OpenAI Function Calling
+
+```python
+import os
+import json
+from openai import OpenAI
+from smolvm import SmolVM
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Define the tool for OpenAI
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "execute_python",
+        "description": "Execute Python code in a secure isolated environment",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "The Python code to execute"
+                }
+            },
+            "required": ["code"]
+        }
+    }
+}]
+
+def execute_python(code: str) -> str:
+    """Execute Python code in SmolVM sandbox."""
+    with SmolVM() as vm:
+        vm.run("apk add --no-cache python3")
+        result = vm.run(f"python3 -c '{code}'")
+        
+        if result.ok:
+            return result.stdout
+        else:
+            return f"Error: {result.stderr}"
+
+# Agent conversation
+messages = [
+    {"role": "user", "content": "Calculate the first 10 Fibonacci numbers"}
+]
+
+response = client.chat.completions.create(
+    model="gpt-4",
+    messages=messages,
+    tools=tools,
+    tool_choice="auto"
+)
+
+message = response.choices[0].message
+
+# Handle tool calls
+if message.tool_calls:
+    for tool_call in message.tool_calls:
+        if tool_call.function.name == "execute_python":
+            args = json.loads(tool_call.function.arguments)
+            result = execute_python(args["code"])
+            
+            messages.append(message)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": result
+            })
+            
+            # Get final response
+            final_response = client.chat.completions.create(
+                model="gpt-4",
+                messages=messages
+            )
+            
+            print(final_response.choices[0].message.content)
+```
+
+## Integration Pattern 4: LangChain Tool
+
+```python
+from langchain.tools import Tool
+from langchain.agents import initialize_agent, AgentType
+from langchain_openai import ChatOpenAI
+from smolvm import SmolVM
+import os
+
+def smolvm_executor(code: str) -> str:
+    """Execute code in SmolVM."""
+    with SmolVM() as vm:
+        vm.run("apk add --no-cache python3 py3-pip")
+        result = vm.run(f"python3 -c '{code}'")
+        return result.stdout if result.ok else f"Error: {result.stderr}"
+
+# Create LangChain tool
+smolvm_tool = Tool(
+    name="SmolVMCodeExecutor",
+    func=smolvm_executor,
+    description="Execute Python code in a secure isolated microVM. "
+                "Use this to run calculations, process data, or test code safely."
+)
+
+# Initialize agent
+llm = ChatOpenAI(temperature=0, model="gpt-4")
+agent = initialize_agent(
+    tools=[smolvm_tool],
+    llm=llm,
+    agent=AgentType.OPENAI_FUNCTIONS,
+    verbose=True
+)
+
+# Run agent
+response = agent.run(
+    "Calculate the sum of squares of numbers from 1 to 100 using Python"
+)
+print(response)
+```
+
+## Security Best Practices
+
+<Steps>
+  <Step title="Use ephemeral VMs for untrusted code">
+    ```python
+    # Good: Fresh VM per execution
+    def run_untrusted_code(code: str):
+        with SmolVM() as vm:
+            return vm.run(code)
+    
+    # Risky: Reusing VM across executions
+    vm = SmolVM()
+    vm.start()
+    vm.run(untrusted_code_1)  # Could modify environment
+    vm.run(untrusted_code_2)  # Runs in modified environment
+    ```
+  </Step>
+
+  <Step title="Set appropriate timeouts">
+    ```python
+    # Prevent infinite loops or slow attacks
+    result = vm.run(agent_code, timeout=30)  # 30 second limit
+    ```
+  </Step>
+
+  <Step title="Limit resource usage">
+    ```python
+    config = VMConfig(
+        vm_id="agent-sandbox",
+        vcpu_count=1,        # Limit CPU
+        mem_size_mib=512,    # Limit memory
+        kernel_path=kernel,
+        rootfs_path=rootfs,
+        boot_args=SSH_BOOT_ARGS,
+    )
+    ```
+  </Step>
+
+  <Step title="Sanitize inputs">
+    ```python
+    import shlex
+    
+    def safe_file_read(vm: SmolVM, path: str) -> str:
+        # Prevent command injection
+        safe_path = shlex.quote(path)
+        result = vm.run(f"cat {safe_path}")
+        return result.stdout
+    ```
+  </Step>
+
+  <Step title="Control network access">
+    ```python
+    # For sensitive operations, verify network isolation
+    with SmolVM() as vm:
+        # Optionally block internet
+        vm.run("apk add --no-cache iptables")
+        vm.run("iptables -A OUTPUT -j DROP")  # Block all outbound
+        
+        # Run untrusted code
+        result = vm.run(agent_code)
+    ```
+  </Step>
+</Steps>
+
+## Real-World Example: Code Analysis Agent
+
+```python
+from smolvm import SmolVM, VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+from smolvm.utils import ensure_ssh_key
+import os
+
+class CodeAnalysisAgent:
+    """Agent that analyzes and runs code safely."""
+    
+    def __init__(self):
+        private_key, public_key = ensure_ssh_key()
+        
+        from smolvm import ImageBuilder
+        builder = ImageBuilder()
+        kernel, rootfs = builder.build_alpine_ssh_key(
+            ssh_public_key=public_key,
+            name="code-analysis",
+            rootfs_size_mb=1024
+        )
+        
+        self.config = VMConfig(
+            vm_id="code-analyzer",
+            vcpu_count=2,
+            mem_size_mib=1024,
+            kernel_path=kernel,
+            rootfs_path=rootfs,
+            boot_args=SSH_BOOT_ARGS,
+        )
+        self.ssh_key = str(private_key)
+    
+    def analyze_and_execute(self, code: str) -> dict:
+        """Analyze code for safety, then execute."""
+        with SmolVM(self.config, ssh_key_path=self.ssh_key) as vm:
+            # Setup analysis tools
+            vm.run("apk add --no-cache python3 py3-pip")
+            vm.run("pip3 install pylint bandit")
+            
+            # Write code to file
+            vm.run(f"cat > /tmp/code.py << 'EOF'\n{code}\nEOF")
+            
+            # Static analysis
+            pylint_result = vm.run("pylint /tmp/code.py || true")
+            bandit_result = vm.run("bandit -r /tmp/code.py || true")
+            
+            # Execute if safe (basic check)
+            has_critical_issues = "CRITICAL" in bandit_result.stdout
+            
+            execution_result = None
+            if not has_critical_issues:
+                execution_result = vm.run("python3 /tmp/code.py", timeout=10)
+            
+            return {
+                "static_analysis": {
+                    "pylint": pylint_result.stdout,
+                    "bandit": bandit_result.stdout,
+                },
+                "safe_to_execute": not has_critical_issues,
+                "execution": {
+                    "ran": execution_result is not None,
+                    "output": execution_result.stdout if execution_result else None,
+                    "success": execution_result.ok if execution_result else False,
+                } if execution_result else None
+            }
+
+# Usage
+agent = CodeAnalysisAgent()
+
+code_sample = """
+import sys
+print(f"Python {sys.version}")
+for i in range(5):
+    print(f"Number: {i}")
+"""
+
+result = agent.analyze_and_execute(code_sample)
+print(f"Safe to execute: {result['safe_to_execute']}")
+if result['execution']:
+    print(f"Output: {result['execution']['output']}")
+```
+
+## Advanced: Multi-Agent Coordination
+
+```python
+from smolvm import SmolVM, VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+from typing import Dict
+import threading
+
+class MultiAgentOrchestrator:
+    """Coordinate multiple agents with isolated environments."""
+    
+    def __init__(self, num_agents: int, kernel, rootfs):
+        self.agents: Dict[str, SmolVM] = {}
+        self.results: Dict[str, dict] = {}
+        
+        for i in range(num_agents):
+            agent_id = f"agent-{i}"
+            config = VMConfig(
+                vm_id=agent_id,
+                vcpu_count=1,
+                mem_size_mib=512,
+                kernel_path=kernel,
+                rootfs_path=rootfs,
+                boot_args=SSH_BOOT_ARGS,
+            )
+            vm = SmolVM(config)
+            vm.start()
+            self.agents[agent_id] = vm
+    
+    def execute_task(self, agent_id: str, task: str):
+        """Execute task on specific agent."""
+        vm = self.agents[agent_id]
+        result = vm.run(task)
+        self.results[agent_id] = {
+            "task": task,
+            "output": result.stdout,
+            "success": result.ok
+        }
+    
+    def execute_parallel(self, tasks: Dict[str, str]):
+        """Execute tasks in parallel across agents."""
+        threads = []
+        for agent_id, task in tasks.items():
+            t = threading.Thread(target=self.execute_task, args=(agent_id, task))
+            t.start()
+            threads.append(t)
+        
+        for t in threads:
+            t.join()
+        
+        return self.results
+    
+    def cleanup(self):
+        """Cleanup all agents."""
+        for vm in self.agents.values():
+            vm.delete()
+            vm.close()
+
+# Usage
+orchestrator = MultiAgentOrchestrator(num_agents=3, kernel=kernel, rootfs=rootfs)
+
+tasks = {
+    "agent-0": "echo 'Agent 0 processing data A'",
+    "agent-1": "echo 'Agent 1 processing data B'",
+    "agent-2": "echo 'Agent 2 processing data C'",
+}
+
+results = orchestrator.execute_parallel(tasks)
+for agent_id, result in results.items():
+    print(f"{agent_id}: {result['output']}")
+
+orchestrator.cleanup()
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Basic Usage" icon="rocket" href="/guides/basic-usage">
+    Master VM lifecycle management
+  </Card>
+  <Card title="Command Execution" icon="terminal" href="/guides/command-execution">
+    Run agent-generated commands safely
+  </Card>
+  <Card title="Environment Variables" icon="gear" href="/guides/environment-variables">
+    Inject API keys and configuration
+  </Card>
+  <Card title="Custom Images" icon="box" href="/guides/custom-images">
+    Build specialized environments for agents
+  </Card>
+</CardGroup>

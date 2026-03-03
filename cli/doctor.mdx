@@ -1,0 +1,307 @@
+---
+title: smolvm doctor
+description: Run host diagnostics to validate your SmolVM environment and backend configuration
+---
+
+## Overview
+
+The `smolvm doctor` command performs comprehensive diagnostics on your system to ensure SmolVM can run properly. It checks for required dependencies, permissions, and backend-specific requirements.
+
+## Basic Usage
+
+```bash
+smolvm doctor
+```
+
+This runs diagnostics for the auto-detected backend (Firecracker on Linux, QEMU on macOS).
+
+## Command Syntax
+
+```bash
+smolvm doctor [--backend BACKEND] [--json] [--strict]
+```
+
+## Options
+
+<ParamField path="--backend" type="string" default="auto">
+  Backend to validate. Choices: `auto`, `firecracker`, `qemu`
+  
+  - `auto`: Automatically detect the appropriate backend for your platform
+  - `firecracker`: Validate Firecracker requirements (Linux + KVM)
+  - `qemu`: Validate QEMU requirements (cross-platform)
+</ParamField>
+
+<ParamField path="--json" type="boolean" default={false}>
+  Emit machine-readable JSON output instead of human-friendly text
+</ParamField>
+
+<ParamField path="--strict" type="boolean" default={false}>
+  Treat warnings as failures. Useful for CI/CD validation
+</ParamField>
+
+## Examples
+
+### Run Diagnostics for Firecracker
+
+```bash
+smolvm doctor --backend firecracker
+```
+
+```
+SmolVM Doctor
+Backend: firecracker (requested: firecracker)
+Platform: Linux x86_64
+
+[PASS] kvm: /dev/kvm is available
+[PASS] firecracker: /home/user/.smolvm/bin/firecracker
+[PASS] command:ip: /usr/sbin/ip
+[PASS] command:nft: /usr/sbin/nft
+[PASS] command:ssh: /usr/bin/ssh
+[PASS] network-permissions: network commands and sudo policy are available
+[WARN] nft-table:ip:smolvm_nat: not created yet (will be created on first VM network setup)
+[WARN] nft-table:inet:smolvm_filter: not created yet (will be created on first VM network setup)
+
+Doctor result: OK
+```
+
+### Run Diagnostics for QEMU on macOS
+
+```bash
+smolvm doctor --backend qemu
+```
+
+```
+SmolVM Doctor
+Backend: qemu (requested: qemu)
+Platform: Darwin arm64
+
+[PASS] qemu: qemu-system-aarch64 (/opt/homebrew/bin/qemu-system-aarch64)
+[PASS] qemu-accel: Hypervisor.framework (hvf) is available
+[PASS] command:ssh: /usr/bin/ssh
+
+Doctor result: OK
+```
+
+### Get JSON Output for Automation
+
+```bash
+smolvm doctor --json
+```
+
+```json
+{
+  "backend_requested": "auto",
+  "backend_resolved": "firecracker",
+  "system": "Linux",
+  "arch": "x86_64",
+  "checks": [
+    {
+      "name": "kvm",
+      "status": "pass",
+      "detail": "/dev/kvm is available"
+    },
+    {
+      "name": "firecracker",
+      "status": "pass",
+      "detail": "/home/user/.smolvm/bin/firecracker"
+    },
+    {
+      "name": "command:ip",
+      "status": "pass",
+      "detail": "/usr/sbin/ip"
+    }
+  ],
+  "summary": {
+    "failures": 0,
+    "warnings": 2,
+    "ok": true,
+    "strict": false
+  }
+}
+```
+
+### Strict Mode for CI/CD
+
+```bash
+smolvm doctor --strict
+```
+
+In strict mode, warnings are treated as failures. This is useful for automated validation:
+
+```
+SmolVM Doctor
+Backend: firecracker (requested: auto)
+Platform: Linux x86_64
+
+[PASS] kvm: /dev/kvm is available
+[PASS] firecracker: /usr/local/bin/firecracker
+[PASS] command:ip: /usr/sbin/ip
+[WARN] command:nft: 'nft' not found (install nftables)
+[PASS] command:ssh: /usr/bin/ssh
+
+Doctor result: FAIL (strict mode treats warnings as failures)
+```
+
+## Checks Performed
+
+### Firecracker Backend
+
+When validating Firecracker, `smolvm doctor` checks:
+
+<ParamField path="kvm" type="check">
+  Verifies `/dev/kvm` is available for hardware virtualization
+</ParamField>
+
+<ParamField path="firecracker" type="check">
+  Locates the Firecracker binary in PATH or `~/.smolvm/bin`
+</ParamField>
+
+<ParamField path="command:ip" type="check">
+  Ensures `ip` command is available (from iproute2 package)
+</ParamField>
+
+<ParamField path="command:nft" type="check">
+  Ensures `nft` command is available (from nftables package)
+</ParamField>
+
+<ParamField path="command:ssh" type="check">
+  Ensures `ssh` command is available (from openssh-client package)
+</ParamField>
+
+<ParamField path="network-permissions" type="check">
+  Validates that network commands and sudo policies are properly configured
+</ParamField>
+
+<ParamField path="nft-table:ip:smolvm_nat" type="check">
+  Checks if SmolVM's NAT table exists (informational - created automatically)
+</ParamField>
+
+<ParamField path="nft-table:inet:smolvm_filter" type="check">
+  Checks if SmolVM's filter table exists (informational - created automatically)
+</ParamField>
+
+### QEMU Backend
+
+When validating QEMU, `smolvm doctor` checks:
+
+<ParamField path="qemu" type="check">
+  Locates `qemu-system-aarch64` or `qemu-system-x86_64` binaries
+</ParamField>
+
+<ParamField path="qemu-accel" type="check">
+  On macOS, verifies Hypervisor.framework (hvf) acceleration is available
+</ParamField>
+
+<ParamField path="command:ssh" type="check">
+  Ensures `ssh` command is available
+</ParamField>
+
+## Exit Codes
+
+- **0**: All checks passed (or warnings in non-strict mode)
+- **1**: One or more checks failed, or warnings in strict mode
+
+## Check Statuses
+
+Each check returns one of three statuses:
+
+- **PASS**: Check succeeded
+- **WARN**: Non-critical issue detected (treated as failure in strict mode)
+- **FAIL**: Critical issue that prevents SmolVM from functioning
+
+## Common Failures
+
+### Missing KVM Access
+
+```
+[FAIL] kvm: /dev/kvm unavailable
+```
+
+**Solution**: Run the system setup script:
+
+```bash
+sudo ./scripts/system-setup.sh --configure-runtime
+```
+
+This configures KVM permissions and adds your user to the appropriate group.
+
+### Firecracker Not Found
+
+```
+[FAIL] firecracker: binary not found in PATH or ~/.smolvm/bin
+```
+
+**Solution**: SmolVM will attempt to download Firecracker automatically on first VM creation. You can also manually install it:
+
+```bash
+# Download and place in ~/.smolvm/bin/firecracker
+# Or install system-wide and add to PATH
+```
+
+### Missing Network Tools
+
+```
+[FAIL] command:nft: 'nft' not found (install nftables)
+```
+
+**Solution**: Install the required package:
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install nftables
+
+# Fedora/RHEL
+sudo dnf install nftables
+```
+
+### Network Permission Issues
+
+```
+[FAIL] network-permissions: sudo policy not configured for ip/nft commands
+```
+
+**Solution**: Run the system setup script to configure passwordless sudo for network commands:
+
+```bash
+sudo ./scripts/system-setup.sh --configure-runtime
+```
+
+## Integration with CI/CD
+
+Use `smolvm doctor` in your CI pipeline to validate the environment:
+
+```yaml
+# GitHub Actions example
+steps:
+  - name: Install SmolVM
+    run: pip install smolvm
+  
+  - name: Validate Environment
+    run: smolvm doctor --strict --json > doctor-report.json
+  
+  - name: Upload Report
+    uses: actions/upload-artifact@v3
+    with:
+      name: doctor-report
+      path: doctor-report.json
+```
+
+<Note>
+  The `--json` flag combined with `--strict` makes it easy to parse results and fail CI builds on any issues.
+</Note>
+
+## Troubleshooting
+
+If `smolvm doctor` reports failures:
+
+1. **Check system requirements**: Ensure you're running on a supported platform (Linux for Firecracker, macOS/Linux for QEMU)
+2. **Run system setup**: Execute `sudo ./scripts/system-setup.sh --configure-runtime`
+3. **Verify permissions**: Make sure your user is in the `kvm` group (Linux) or has appropriate privileges
+4. **Install missing tools**: Install any missing dependencies reported by doctor
+5. **Check virtualization**: Ensure hardware virtualization is enabled in your BIOS/UEFI
+
+## See Also
+
+- [CLI Overview](/cli/overview) - General CLI usage and configuration
+- [Cleanup Command](/cli/cleanup) - Clean up VM resources
+- [MicroVM Architecture](/concepts/microvm-architecture) - Understanding SmolVM's architecture

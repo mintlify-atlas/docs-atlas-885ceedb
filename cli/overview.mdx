@@ -1,0 +1,187 @@
+---
+title: CLI Overview
+description: SmolVM command-line tools for VM management, diagnostics, and environment configuration
+---
+
+## Installation
+
+The `smolvm` CLI is installed automatically when you install the SmolVM package:
+
+```bash
+pip install smolvm
+```
+
+For dashboard functionality, install with the dashboard extra:
+
+```bash
+pip install 'smolvm[dashboard]'
+```
+
+## Basic Usage
+
+The `smolvm` command provides several subcommands for managing VMs and system diagnostics:
+
+```bash
+smolvm <command> [options]
+```
+
+### Available Commands
+
+<CardGroup cols={2}>
+  <Card title="doctor" icon="stethoscope" href="/cli/doctor">
+    Run host diagnostics for your selected backend
+  </Card>
+  <Card title="cleanup" icon="broom" href="/cli/cleanup">
+    Clean stale SmolVM resources and VMs
+  </Card>
+  <Card title="env" icon="code" href="/cli/env">
+    Manage environment variables on running VMs
+  </Card>
+  <Card title="ui" icon="desktop" href="/cli/ui">
+    Start the SmolVM dashboard UI server
+  </Card>
+</CardGroup>
+
+## Getting Help
+
+Display the main help message:
+
+```bash
+smolvm --help
+```
+
+Get help for a specific command:
+
+```bash
+smolvm doctor --help
+smolvm cleanup --help
+smolvm env --help
+```
+
+## Exit Codes
+
+SmolVM CLI commands follow standard Unix exit code conventions:
+
+- **0**: Success
+- **1**: General failure or error
+- **2**: Invalid usage or missing required arguments
+- **130**: Interrupted by user (Ctrl+C)
+
+## CLI Scripts
+
+SmolVM provides two CLI entry points:
+
+<ParamField path="smolvm" type="string">
+  Main CLI with all subcommands (doctor, cleanup, env, ui)
+</ParamField>
+
+<ParamField path="smolvm-cleanup" type="string">
+  Standalone cleanup utility for convenience
+</ParamField>
+
+## Common Workflows
+
+### First-Time Setup Validation
+
+After installing SmolVM, verify your system is properly configured:
+
+```bash
+smolvm doctor
+```
+
+If you encounter failures, run the system setup script:
+
+```bash
+sudo ./scripts/system-setup.sh --configure-runtime
+```
+
+### VM Resource Management
+
+Clean up stale or auto-created VMs:
+
+```bash
+# Preview what will be deleted
+smolvm cleanup --dry-run
+
+# Clean auto-created VMs (vm-* prefix)
+smolvm cleanup
+
+# Clean all VMs
+smolvm cleanup --all
+```
+
+### Environment Configuration
+
+Set environment variables on a running VM:
+
+```bash
+# Set multiple variables
+smolvm env set my-vm API_KEY=secret DATABASE_URL=postgres://...
+
+# List variables (values masked by default)
+smolvm env list my-vm
+
+# Show actual values
+smolvm env list my-vm --show-values
+
+# Remove variables
+smolvm env unset my-vm API_KEY DATABASE_URL
+```
+
+### Dashboard UI
+
+Launch the web-based dashboard:
+
+```bash
+# Start on default port 8080
+smolvm ui
+
+# Custom host and port
+smolvm ui --host 0.0.0.0 --port 3000
+```
+
+## Configuration
+
+The CLI respects the following environment variables:
+
+<ParamField path="SMOLVM_DASHBOARD_ALLOW_BETA" type="boolean">
+  Allow dashboard UI downloads from prerelease/beta tags (set by `--allow-beta` flag)
+</ParamField>
+
+<ParamField path="SMOLVM_DASHBOARD_URL" type="string">
+  Dashboard URL (automatically set by the `ui` command)
+</ParamField>
+
+## SSH Configuration
+
+Commands that interact with VMs (like `env`) use SSH. By default:
+
+- **SSH User**: `root`
+- **SSH Key**: `~/.smolvm/keys/id_ed25519`
+
+You can override these with command-line flags:
+
+```bash
+smolvm env list my-vm --ssh-user admin --ssh-key ~/.ssh/custom_key
+```
+
+<Note>
+  SmolVM automatically generates SSH keys during VM creation if they don't exist.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Doctor Command" icon="stethoscope" href="/cli/doctor">
+    Learn about system diagnostics
+  </Card>
+  <Card title="Cleanup Command" icon="broom" href="/cli/cleanup">
+    Understand resource management
+  </Card>
+  <Card title="Environment Commands" icon="code" href="/cli/env">
+    Configure VM environments
+  </Card>
+  <Card title="Dashboard UI" icon="desktop" href="/cli/ui">
+    Explore the web interface
+  </Card>
+</CardGroup>

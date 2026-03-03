@@ -1,0 +1,408 @@
+---
+title: "SmolVMManager"
+description: "Low-level manager for orchestrating sandbox VMs with state persistence"
+---
+
+## Overview
+
+The `SmolVMManager` class provides low-level operations for creating, starting, stopping, and managing VMs with proper state persistence and cleanup. It orchestrates VM lifecycle, networking, and state management across runtimes (Firecracker and QEMU).
+
+**Key Features:**
+- Backend-agnostic VM orchestration (Firecracker/QEMU)
+- SQLite-backed state persistence
+- Automatic resource allocation (IP, TAP, ports)
+- Network setup with NAT and port forwarding
+- Prerequisite validation
+
+## Constructor
+
+```python
+SmolVMManager(
+    data_dir: Path | None = None,
+    socket_dir: Path | None = None,
+    backend: str | None = None,
+)
+```
+
+### Parameters
+
+<ParamField path="data_dir" type="Path | None" default="None">
+  Directory for state database. If omitted, SmolVM resolves a writable default:
+  - `$SMOLVM_DATA_DIR` environment variable
+  - `~/.local/state/smolvm` (user state directory)
+  - `/var/lib/smolvm` (system fallback)
+</ParamField>
+
+<ParamField path="socket_dir" type="Path | None" default="None">
+  Directory for VM sockets. Defaults to `/tmp`.
+</ParamField>
+
+<ParamField path="backend" type="str | None" default="None">
+  Runtime backend: `"firecracker"`, `"qemu"`, or `"auto"`. Defaults to `"auto"` via `smolvm.backends.resolve_backend()`.
+</ParamField>
+
+### Example
+
+```python
+from smolvm.vm import SmolVMManager
+from pathlib import Path
+
+# Use default data directory resolution
+sdk = SmolVMManager()
+
+# Or specify custom paths
+sdk = SmolVMManager(
+    data_dir=Path("/custom/state"),
+    socket_dir=Path("/custom/sockets"),
+    backend="firecracker",
+)
+```
+
+## Class Methods
+
+### from_id
+
+```python
+@classmethod
+def from_id(cls, vm_id: str, **kwargs: Any) -> SmolVMManager
+```
+
+Create an SDK instance and verify a VM exists. Useful for attaching to an existing VM from a different process.
+
+<ParamField path="vm_id" type="str" required>
+  The VM identifier to look up.
+</ParamField>
+
+<ParamField path="**kwargs" type="Any">
+  Forwarded to `__init__()` (e.g., `data_dir`, `backend`).
+</ParamField>
+
+**Returns:** A `SmolVMManager` instance whose state DB contains the VM.
+
+**Raises:** `VMNotFoundError` if no VM with this ID exists.
+
+```python Example
+from smolvm.vm import SmolVMManager
+
+sdk = SmolVMManager.from_id("my-vm")
+info = sdk.get("my-vm")
+print(info.status)
+```
+
+## VM Lifecycle
+
+### create
+
+```python
+def create(self, config: VMConfig) -> VMInfo
+```
+
+Create a new microVM. This allocates resources (IP, TAP device) and persists state, but does not start the VM.
+
+<ParamField path="config" type="VMConfig" required>
+  VM configuration.
+</ParamField>
+
+**Returns:** `VMInfo` for the created VM.
+
+**Raises:**
+- `VMAlreadyExistsError`: If VM ID already exists.
+- `NetworkError`: If network setup fails.
+- `ValidationError`: If config is invalid.
+
+```python Example
+from smolvm.vm import SmolVMManager
+from smolvm.types import VMConfig
+from pathlib import Path
+
+sdk = SmolVMManager()
+config = VMConfig(
+    vm_id="test-vm",
+    vcpu_count=2,
+    mem_size_mib=512,
+    kernel_path=Path("/path/to/kernel"),
+    rootfs_path=Path("/path/to/rootfs.ext4"),
+    boot_args="console=ttyS0 reboot=k panic=1 pci=off init=/init",
+)
+
+vm_info = sdk.create(config)
+print(f"Created VM: {vm_info.vm_id} with IP {vm_info.network.guest_ip}")
+```
+
+### start
+
+```python
+def start(
+    self,
+    vm_id: str,
+    boot_timeout: float = 30.0,
+) -> VMInfo
+```
+
+Start a microVM.
+
+<ParamField path="vm_id" type="str" required>
+  The VM identifier.
+</ParamField>
+
+<ParamField path="boot_timeout" type="float" default="30.0">
+  Maximum seconds to wait for boot.
+</ParamField>
+
+**Returns:** Updated `VMInfo`.
+
+**Raises:**
+- `VMNotFoundError`: If VM doesn't exist.
+- `SmolVMError`: If VM is not in `CREATED` or `STOPPED` state.
+- `TimeoutError`: If boot times out.
+
+### stop
+
+```python
+def stop(self, vm_id: str, timeout: float = 10.0) -> VMInfo
+```
+
+Stop a running microVM.
+
+<ParamField path="vm_id" type="str" required>
+  The VM identifier.
+</ParamField>
+
+<ParamField path="timeout" type="float" default="10.0">
+  Seconds to wait for graceful shutdown before killing.
+</ParamField>
+
+**Returns:** Updated `VMInfo`.
+
+**Raises:** `VMNotFoundError` if VM doesn't exist.
+
+### delete
+
+```python
+def delete(self, vm_id: str) -> None
+```
+
+Delete a VM and all its resources.
+
+<ParamField path="vm_id" type="str" required>
+  The VM identifier.
+</ParamField>
+
+**Raises:** `VMNotFoundError` if VM doesn't exist.
+
+## VM Information
+
+### get
+
+```python
+def get(self, vm_id: str) -> VMInfo
+```
+
+Get VM information.
+
+<ParamField path="vm_id" type="str" required>
+  The VM identifier.
+</ParamField>
+
+**Returns:** `VMInfo` for the VM.
+
+**Raises:** `VMNotFoundError` if VM doesn't exist.
+
+### list_vms
+
+```python
+def list_vms(self, status: VMState | None = None) -> list[VMInfo]
+```
+
+List all VMs.
+
+<ParamField path="status" type="VMState | None" default="None">
+  Filter by status (optional).
+</ParamField>
+
+**Returns:** List of `VMInfo` objects.
+
+```python Example
+from smolvm.vm import SmolVMManager
+from smolvm.types import VMState
+
+sdk = SmolVMManager()
+
+# List all VMs
+all_vms = sdk.list_vms()
+
+# List only running VMs
+running = sdk.list_vms(status=VMState.RUNNING)
+for vm in running:
+    print(f"{vm.vm_id}: {vm.network.guest_ip}")
+```
+
+## State Management
+
+### reconcile
+
+```python
+def reconcile(self) -> list[str]
+```
+
+Reconcile state with actual system state. Detects and marks stale VMs (marked running but process dead).
+
+**Returns:** List of VM IDs that were marked as `ERROR`.
+
+```python Example
+sdk = SmolVMManager()
+stale_vms = sdk.reconcile()
+if stale_vms:
+    print(f"Found {len(stale_vms)} stale VMs: {stale_vms}")
+```
+
+## SSH Access
+
+### get_ssh_commands
+
+```python
+def get_ssh_commands(
+    self,
+    vm_id: str,
+    *,
+    ssh_user: str = "root",
+    key_path: str | Path | None = None,
+    public_host: str | None = None,
+) -> dict[str, str]
+```
+
+Return ready-to-run SSH commands for a VM.
+
+<ParamField path="vm_id" type="str" required>
+  The VM identifier.
+</ParamField>
+
+<ParamField path="ssh_user" type="str" default="root">
+  SSH username.
+</ParamField>
+
+<ParamField path="key_path" type="str | Path | None" default="None">
+  Optional SSH private key path.
+</ParamField>
+
+<ParamField path="public_host" type="str | None" default="None">
+  Public hostname for remote access.
+</ParamField>
+
+**Returns:** Dictionary containing:
+- `"private_ip"`: connect directly to guest IP from host
+- `"localhost_port"`: connect via reserved forwarded host port
+- `"public"`: connect from internet (only when `public_host` given)
+
+```python Example
+sdk = SmolVMManager()
+commands = sdk.get_ssh_commands(
+    "my-vm",
+    ssh_user="ubuntu",
+    key_path="~/.ssh/id_ed25519",
+)
+print("SSH via localhost:", commands["localhost_port"])
+print("SSH via private IP:", commands["private_ip"])
+```
+
+## Prerequisites
+
+### check_prerequisites
+
+```python
+def check_prerequisites(self) -> list[str]
+```
+
+Check if all prerequisites are met. Uses backend-specific validation:
+- **firecracker**: KVM + Linux networking + Firecracker binary
+- **qemu**: qemu-system binary + SSH client
+
+**Returns:** List of error messages (empty if all good).
+
+```python Example
+sdk = SmolVMManager()
+errors = sdk.check_prerequisites()
+if errors:
+    print("Prerequisites missing:")
+    for error in errors:
+        print(f"  - {error}")
+else:
+    print("All prerequisites met!")
+```
+
+## Context Manager
+
+The `SmolVMManager` class implements the context manager protocol:
+
+```python
+with SmolVMManager() as sdk:
+    vm_info = sdk.create(config)
+    sdk.start(vm_info.vm_id)
+    # Resources automatically released on exit
+```
+
+### close
+
+```python
+def close(self) -> None
+```
+
+Release all resources held by this manager. Closes open log-file handles. Calling `close()` more than once is safe (idempotent).
+
+## Attributes
+
+### data_dir
+
+```python
+data_dir: Path
+```
+
+Directory for state database and VM-specific files.
+
+### socket_dir
+
+```python
+socket_dir: Path
+```
+
+Directory for VM sockets.
+
+### backend
+
+```python
+backend: str
+```
+
+Resolved runtime backend (`"firecracker"` or `"qemu"`).
+
+### disk_dir
+
+```python
+disk_dir: Path
+```
+
+Directory for isolated VM disk images (`data_dir/disks`).
+
+### state
+
+```python
+state: StateManager
+```
+
+State manager for VM persistence.
+
+### network
+
+```python
+network: NetworkManager
+```
+
+Network manager for TAP devices and routing.
+
+### host
+
+```python
+host: HostManager
+```
+
+Host capability manager.

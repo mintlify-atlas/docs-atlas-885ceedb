@@ -1,0 +1,603 @@
+---
+title: Reconnecting to VMs
+description: Reconnect to existing SmolVM instances for persistent workflows, stateful applications, and long-running tasks
+---
+
+## Overview
+
+SmolVM allows you to reconnect to existing VMs using their unique identifier. This enables persistent workflows where you can stop, restart, and reconnect to VMs across different Python sessions or processes.
+
+## Quick Start
+
+```python
+from smolvm import SmolVM, VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+
+# Session 1: Create a VM with a known ID
+config = VMConfig(
+    vm_id="my-persistent-vm",
+    kernel_path=kernel,
+    rootfs_path=rootfs,
+    boot_args=SSH_BOOT_ARGS,
+)
+
+vm = SmolVM(config)
+vm.start()
+vm.run("echo 'Hello' > /data/greeting.txt")
+vm.stop()  # Don't delete
+vm.close()
+
+# Session 2: Reconnect to the same VM
+vm = SmolVM.from_id("my-persistent-vm")
+vm.start()
+result = vm.run("cat /data/greeting.txt")
+print(result.output)  # Hello
+vm.stop()
+vm.delete()
+vm.close()
+```
+
+## Reconnecting Methods
+
+### Using from_id() Class Method
+
+The recommended way to reconnect:
+
+```python
+from smolvm import SmolVM
+
+# Reconnect to existing VM
+vm = SmolVM.from_id(
+    vm_id="my-vm",
+    ssh_user="root",
+    ssh_key_path="~/.smolvm/keys/id_ed25519"
+)
+
+vm.start()
+print(f"Reconnected to {vm.vm_id}")
+print(f"Status: {vm.status}")
+```
+
+### Using Constructor with vm_id Parameter
+
+Alternative syntax:
+
+```python
+vm = SmolVM(
+    vm_id="my-vm",
+    ssh_user="root",
+    ssh_key_path="~/.smolvm/keys/id_ed25519"
+)
+```
+
+<Note>
+Both methods are equivalent. Use `from_id()` for clarity when reconnecting.
+</Note>
+
+## Ownership and Lifecycle
+
+### Created VMs vs Reconnected VMs
+
+SmolVM tracks whether it "owns" a VM:
+
+<CodeGroup>
+```python Created VM (Owned)
+from smolvm import SmolVM
+
+# Created by this instance
+with SmolVM() as vm:
+    # Automatically starts
+    vm.run("hostname")
+# Automatically stops AND deletes
+```
+
+```python Reconnected VM (Not Owned)
+from smolvm import SmolVM
+
+# Reconnected to existing VM
+with SmolVM.from_id("existing-vm") as vm:
+    # Does NOT auto-start
+    vm.start()  # Must start manually
+    vm.run("hostname")
+# Automatically stops but does NOT delete
+```
+</CodeGroup>
+
+### Context Manager Behavior
+
+| Action | Created VM | Reconnected VM |
+|--------|-----------|----------------|
+| On enter | Auto-starts | No change |
+| On exit (normal) | Stops & deletes | Stops only |
+| On exit (exception) | Stops & deletes | Stops only |
+
+```python
+# Reconnected VM is NOT deleted on exit
+with SmolVM.from_id("my-vm") as vm:
+    vm.start()
+    vm.run("some-command")
+# VM is stopped but still exists
+
+# Explicitly delete if needed
+vm.delete()
+```
+
+## Persistent Workflow Patterns
+
+### Long-Running Development Environment
+
+```python
+from smolvm import SmolVM, VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+
+def get_or_create_dev_vm(vm_id: str) -> SmolVM:
+    """Get existing dev VM or create a new one."""
+    try:
+        # Try to reconnect
+        vm = SmolVM.from_id(vm_id)
+        print(f"Reconnected to existing VM: {vm_id}")
+        return vm
+    except Exception:
+        # Create new VM
+        print(f"Creating new VM: {vm_id}")
+        config = VMConfig(
+            vm_id=vm_id,
+            kernel_path=kernel,
+            rootfs_path=rootfs,
+            boot_args=SSH_BOOT_ARGS,
+        )
+        return SmolVM(config)
+
+# Use in different sessions
+vm = get_or_create_dev_vm("dev-env")
+vm.start()
+
+# Do work...
+vm.run("git clone https://github.com/example/repo.git /workspace")
+
+# Stop but keep VM
+vm.stop()
+vm.close()
+
+# Later: reconnect and continue
+vm = get_or_create_dev_vm("dev-env")
+vm.start()
+result = vm.run("ls /workspace")
+print(result.output)  # repo is still there
+```
+
+### Stateful Application Server
+
+```python
+import time
+from smolvm import SmolVM, VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+
+VMID = "app-server"
+
+# Initial setup
+config = VMConfig(
+    vm_id=VMID,
+    vcpu_count=2,
+    mem_size_mib=2048,
+    kernel_path=kernel,
+    rootfs_path=rootfs,
+    boot_args=SSH_BOOT_ARGS,
+)
+
+vm = SmolVM(config)
+vm.start()
+
+# Install application
+vm.run("apk add --no-cache python3 py3-pip")
+vm.run("pip3 install flask redis")
+vm.run("mkdir -p /app")
+# ... deploy application files ...
+
+# Start application
+vm.run("nohup python3 /app/server.py > /tmp/app.log 2>&1 &")
+port = vm.expose_local(guest_port=5000)
+
+print(f"Application running at http://localhost:{port}")
+print("VM can be stopped and restarted")
+
+# Stop VM (application state persists in disk)
+vm.stop()
+vm.close()
+
+print("\n--- Later: Restart the application ---\n")
+
+# Reconnect and restart
+vm = SmolVM.from_id(VMID)
+vm.start()
+
+# Application files are still there
+result = vm.run("ls /app")
+print(f"App files: {result.output}")
+
+# Restart the service
+vm.run("nohup python3 /app/server.py > /tmp/app.log 2>&1 &")
+port = vm.expose_local(guest_port=5000)
+print(f"Application restarted at http://localhost:{port}")
+```
+
+### Multi-Process Coordination
+
+```python
+import multiprocessing
+from smolvm import SmolVM, VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+
+def worker(vm_id: str, task_id: int):
+    """Worker process connects to shared VM."""
+    vm = SmolVM.from_id(vm_id)
+    vm.start()
+    
+    result = vm.run(f"echo 'Task {task_id} completed' >> /shared/results.txt")
+    print(f"Worker {task_id}: {result.ok}")
+    
+    vm.stop()
+    vm.close()
+
+# Main process: create VM
+config = VMConfig(
+    vm_id="shared-vm",
+    kernel_path=kernel,
+    rootfs_path=rootfs,
+    boot_args=SSH_BOOT_ARGS,
+)
+
+vm = SmolVM(config)
+vm.start()
+vm.run("mkdir -p /shared")
+vm.run("touch /shared/results.txt")
+vm.stop()
+vm.close()
+
+# Spawn workers that reconnect
+processes = []
+for i in range(5):
+    p = multiprocessing.Process(target=worker, args=("shared-vm", i))
+    p.start()
+    processes.append(p)
+
+for p in processes:
+    p.join()
+
+# Check results
+vm = SmolVM.from_id("shared-vm")
+vm.start()
+result = vm.run("cat /shared/results.txt")
+print(f"\nResults:\n{result.output}")
+vm.delete()  # Clean up
+```
+
+## Disk Persistence
+
+### Isolated Disk Mode (Default)
+
+By default, VMs use isolated disks that persist between restarts:
+
+```python
+config = VMConfig(
+    vm_id="persistent-vm",
+    kernel_path=kernel,
+    rootfs_path=rootfs,
+    boot_args=SSH_BOOT_ARGS,
+    disk_mode="isolated",  # Default
+)
+
+vm = SmolVM(config)
+vm.start()
+
+# Write data
+vm.run("echo 'persistent data' > /data/file.txt")
+vm.stop()
+vm.close()
+
+# Reconnect - data is still there
+vm = SmolVM.from_id("persistent-vm")
+vm.start()
+result = vm.run("cat /data/file.txt")
+print(result.output)  # persistent data
+```
+
+### Retaining Disk on Delete
+
+```python
+config = VMConfig(
+    vm_id="recoverable-vm",
+    kernel_path=kernel,
+    rootfs_path=rootfs,
+    boot_args=SSH_BOOT_ARGS,
+    retain_disk_on_delete=True,  # Keep disk after delete
+)
+
+vm = SmolVM(config)
+vm.start()
+vm.run("echo 'important data' > /important.txt")
+vm.stop()
+vm.delete()  # VM deleted, but disk retained
+vm.close()
+
+# Recreate VM with same ID
+config2 = VMConfig(
+    vm_id="recoverable-vm",  # Same ID
+    kernel_path=kernel,
+    rootfs_path=rootfs,
+    boot_args=SSH_BOOT_ARGS,
+)
+
+vm2 = SmolVM(config2)
+vm2.start()
+result = vm2.run("cat /important.txt")
+print(result.output)  # important data
+```
+
+<Warning>
+Retained disks remain in the data directory until manually removed or a new VM with the same ID is created without `retain_disk_on_delete`.
+</Warning>
+
+## VM Discovery and Management
+
+### Listing VMs
+
+```python
+from smolvm import SmolVMManager
+
+# List all VMs
+manager = SmolVMManager()
+vms = manager.list_vms()
+
+for vm_info in vms:
+    print(f"VM: {vm_info.vm_id}")
+    print(f"  Status: {vm_info.status}")
+    print(f"  IP: {vm_info.network.guest_ip if vm_info.network else 'N/A'}")
+    print()
+```
+
+### Checking VM Existence
+
+```python
+from smolvm import SmolVMManager
+from smolvm.exceptions import VMNotFoundError
+
+def vm_exists(vm_id: str) -> bool:
+    """Check if a VM exists."""
+    try:
+        manager = SmolVMManager()
+        manager.get(vm_id)
+        return True
+    except VMNotFoundError:
+        return False
+
+if vm_exists("my-vm"):
+    vm = SmolVM.from_id("my-vm")
+else:
+    vm = SmolVM(VMConfig(vm_id="my-vm", ...))
+```
+
+## Error Handling
+
+### VM Not Found
+
+```python
+from smolvm import SmolVM
+from smolvm.exceptions import VMNotFoundError
+
+try:
+    vm = SmolVM.from_id("nonexistent-vm")
+except VMNotFoundError as e:
+    print(f"VM not found: {e}")
+    # Create instead of reconnecting
+```
+
+### Stale VMs
+
+```python
+from smolvm import SmolVM
+from smolvm.exceptions import SmolVMError
+
+try:
+    vm = SmolVM.from_id("old-vm")
+    vm.start()
+except SmolVMError as e:
+    print(f"Failed to start VM: {e}")
+    # VM might be in error state
+    vm.delete()  # Clean up and recreate
+```
+
+## Advanced Patterns
+
+### VM Pool Management
+
+```python
+from typing import Dict
+from smolvm import SmolVM, VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+
+class VMPool:
+    """Manage a pool of reusable VMs."""
+    
+    def __init__(self, pool_size: int, kernel: str, rootfs: str):
+        self.pool_size = pool_size
+        self.kernel = kernel
+        self.rootfs = rootfs
+        self.available: Dict[str, SmolVM] = {}
+        self.in_use: Dict[str, SmolVM] = {}
+    
+    def initialize(self):
+        """Create initial pool of VMs."""
+        for i in range(self.pool_size):
+            vm_id = f"pool-vm-{i}"
+            config = VMConfig(
+                vm_id=vm_id,
+                kernel_path=self.kernel,
+                rootfs_path=self.rootfs,
+                boot_args=SSH_BOOT_ARGS,
+            )
+            vm = SmolVM(config)
+            vm.start()
+            vm.stop()  # Prepared but stopped
+            self.available[vm_id] = vm
+    
+    def acquire(self) -> SmolVM:
+        """Get a VM from the pool."""
+        if not self.available:
+            raise RuntimeError("No VMs available in pool")
+        
+        vm_id, vm = self.available.popitem()
+        vm.start()
+        self.in_use[vm_id] = vm
+        return vm
+    
+    def release(self, vm: SmolVM):
+        """Return a VM to the pool."""
+        vm.stop()
+        vm_id = vm.vm_id
+        self.in_use.pop(vm_id)
+        self.available[vm_id] = vm
+    
+    def cleanup(self):
+        """Delete all VMs in the pool."""
+        for vm in list(self.available.values()):
+            vm.delete()
+        for vm in list(self.in_use.values()):
+            vm.delete()
+
+# Usage
+pool = VMPool(pool_size=5, kernel=kernel, rootfs=rootfs)
+pool.initialize()
+
+vm1 = pool.acquire()
+vm1.run("echo 'Task 1'")
+pool.release(vm1)
+
+vm2 = pool.acquire()  # Might get vm1 back
+vm2.run("echo 'Task 2'")
+pool.release(vm2)
+
+pool.cleanup()
+```
+
+### Session-Based Reconnection
+
+```python
+import json
+from pathlib import Path
+from smolvm import SmolVM, VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+
+SESSION_FILE = Path(".vm_session.json")
+
+def save_session(vm: SmolVM):
+    """Save VM session info."""
+    session_data = {
+        "vm_id": vm.vm_id,
+        "status": vm.status.value,
+    }
+    SESSION_FILE.write_text(json.dumps(session_data))
+
+def load_session() -> SmolVM | None:
+    """Load previous VM session."""
+    if not SESSION_FILE.exists():
+        return None
+    
+    session_data = json.loads(SESSION_FILE.read_text())
+    try:
+        vm = SmolVM.from_id(session_data["vm_id"])
+        print(f"Restored session: {vm.vm_id}")
+        return vm
+    except Exception:
+        return None
+
+# Try to restore previous session
+vm = load_session()
+
+if vm is None:
+    # Create new session
+    config = VMConfig(
+        vm_id="session-vm",
+        kernel_path=kernel,
+        rootfs_path=rootfs,
+        boot_args=SSH_BOOT_ARGS,
+    )
+    vm = SmolVM(config)
+    print("Created new session")
+
+vm.start()
+save_session(vm)
+
+# Do work...
+vm.run("echo 'Work in progress' > /work/status.txt")
+
+vm.stop()
+vm.close()
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Use meaningful VM IDs">
+    Choose IDs that describe the VM's purpose:
+    ```python
+    # Good
+    VMConfig(vm_id="api-server-prod")
+    VMConfig(vm_id="ci-runner-node-1")
+    
+    # Avoid
+    VMConfig(vm_id="vm123")
+    VMConfig(vm_id="test")
+    ```
+  </Step>
+
+  <Step title="Handle reconnection failures">
+    Always handle cases where VM might not exist:
+    ```python
+    try:
+        vm = SmolVM.from_id("my-vm")
+    except VMNotFoundError:
+        # Create instead
+        vm = SmolVM(VMConfig(vm_id="my-vm", ...))
+    ```
+  </Step>
+
+  <Step title="Clean up when done">
+    Explicitly delete VMs you won't need again:
+    ```python
+    vm = SmolVM.from_id("temp-vm")
+    try:
+        vm.start()
+        # Do work
+    finally:
+        vm.delete()  # Clean up
+        vm.close()
+    ```
+  </Step>
+
+  <Step title="Document persistence requirements">
+    Be clear about which VMs need to persist:
+    ```python
+    # Ephemeral - will be deleted
+    with SmolVM() as vm:
+        pass
+    
+    # Persistent - manual lifecycle
+    vm = SmolVM(VMConfig(vm_id="persistent-server", ...))
+    ```
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Basic Usage" icon="rocket" href="/guides/basic-usage">
+    Learn VM lifecycle fundamentals
+  </Card>
+  <Card title="Environment Variables" icon="gear" href="/guides/environment-variables">
+    Manage persistent configuration
+  </Card>
+  <Card title="AI Agent Integration" icon="robot" href="/guides/ai-agent-integration">
+    Build stateful agent environments
+  </Card>
+</CardGroup>

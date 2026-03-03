@@ -1,0 +1,268 @@
+---
+title: Basic VM Usage
+description: Learn VM lifecycle management with SmolVM - creating, starting, stopping, and deleting microVMs
+---
+
+## Overview
+
+SmolVM provides a simple, intuitive interface for managing microVM lifecycles. You can create VMs using auto-configuration or custom settings, control their lifecycle states, and use context managers for automatic cleanup.
+
+## Auto-Configuration Mode
+
+The simplest way to get started is with auto-configuration. SmolVM automatically provisions an SSH-ready Alpine Linux VM:
+
+```python
+from smolvm import SmolVM
+
+# Auto-configured VM with sensible defaults
+with SmolVM() as vm:
+    print(f"VM ID: {vm.vm_id}")
+    print(f"IP Address: {vm.get_ip()}")
+    result = vm.run("uname -a")
+    print(result.stdout)
+```
+
+### Customizing Auto-Configuration
+
+You can customize memory and disk size when using auto-config:
+
+```python
+with SmolVM(mem_size_mib=1024, disk_size_mib=1024) as vm:
+    result = vm.run("free -h")
+    print(result.output)
+```
+
+<Note>
+Auto-configured VMs use Alpine Linux with SSH pre-configured, allowing immediate command execution via `vm.run()`.
+</Note>
+
+## Manual VM Creation
+
+For advanced use cases, create VMs with custom configurations:
+
+<Steps>
+  <Step title="Build or locate your image">
+    Use `ImageBuilder` to create custom images with SSH:
+
+    ```python
+    from smolvm import ImageBuilder
+    from smolvm.build import SSH_BOOT_ARGS
+
+    builder = ImageBuilder()
+    kernel, rootfs = builder.build_alpine_ssh(
+        name="my-custom-image",
+        ssh_password="secure-password",
+        rootfs_size_mb=1024
+    )
+    ```
+  </Step>
+
+  <Step title="Create VM configuration">
+    ```python
+    from smolvm import VMConfig
+
+    config = VMConfig(
+        vm_id="my-vm",
+        vcpu_count=2,
+        mem_size_mib=1024,
+        kernel_path=kernel,
+        rootfs_path=rootfs,
+        boot_args=SSH_BOOT_ARGS,
+    )
+    ```
+  </Step>
+
+  <Step title="Initialize and start the VM">
+    ```python
+    from smolvm import SmolVM
+
+    vm = SmolVM(config)
+    vm.start()
+    print(f"VM running at {vm.get_ip()}")
+    ```
+  </Step>
+</Steps>
+
+## VM Lifecycle Methods
+
+### Starting a VM
+
+```python
+vm = SmolVM(config)
+vm.start(boot_timeout=30.0)
+
+# Check status
+print(vm.status)  # VMState.RUNNING
+```
+
+The `start()` method:
+- Boots the microVM
+- Waits for the VM to be ready (up to `boot_timeout` seconds)
+- Injects environment variables if configured
+- Returns `self` for method chaining
+
+### Stopping a VM
+
+```python
+vm.stop(timeout=3.0)
+print(vm.status)  # VMState.STOPPED
+```
+
+<Note>
+Stopping sends a graceful shutdown signal. If the VM doesn't stop within `timeout` seconds, it will be forcefully terminated.
+</Note>
+
+### Deleting a VM
+
+```python
+vm.delete()
+```
+
+This permanently removes:
+- The VM process
+- Network configuration (TAP devices, forwarding rules)
+- VM state from the database
+- Isolated disk (unless `retain_disk_on_delete=True`)
+
+### Refreshing VM State
+
+```python
+# Refresh cached information from the state store
+vm.refresh()
+print(vm.info)  # Updated VMInfo
+```
+
+## Context Manager Pattern
+
+The recommended pattern is using SmolVM as a context manager for automatic lifecycle management:
+
+```python
+with SmolVM(config) as vm:
+    # VM automatically starts on context entry
+    result = vm.run("hostname")
+    print(result.output)
+    # VM automatically stops and deletes on context exit
+```
+
+<CodeGroup>
+```python Auto-config
+from smolvm import SmolVM
+
+with SmolVM() as vm:
+    print(f"VM {vm.vm_id} is ready")
+    vm.run("echo 'Hello World'")
+# Automatic cleanup
+```
+
+```python Custom Config
+from smolvm import SmolVM, VMConfig
+from smolvm.build import SSH_BOOT_ARGS
+
+config = VMConfig(
+    vm_id="demo",
+    vcpu_count=1,
+    mem_size_mib=512,
+    kernel_path="/path/to/kernel",
+    rootfs_path="/path/to/rootfs",
+    boot_args=SSH_BOOT_ARGS,
+)
+
+with SmolVM(config) as vm:
+    result = vm.run("df -h")
+    print(result.output)
+```
+</CodeGroup>
+
+### Context Manager Behavior
+
+<Accordion title="What happens on context entry?">
+For VMs created by the facade instance (not reconnected), the VM automatically starts. Reconnected VMs remain in their current state.
+</Accordion>
+
+<Accordion title="What happens on context exit?">
+1. **Stop**: If the VM is running, it gracefully stops
+2. **Delete**: If the facade created the VM (owns it), it's deleted
+3. **Close**: SDK resources are released
+
+VMs reconnected via `from_id()` are stopped but not deleted.
+</Accordion>
+
+## Manual Lifecycle Management
+
+For long-running VMs, manage lifecycle manually:
+
+```python
+from smolvm import SmolVM, VMConfig
+
+vm = SmolVM(config)
+try:
+    vm.start()
+    # Do work...
+    result = vm.run("uptime")
+    print(result.output)
+finally:
+    vm.stop()
+    vm.delete()
+    vm.close()
+```
+
+<Warning>
+Always call `vm.close()` when you're done to release SDK resources, even if you're not deleting the VM.
+</Warning>
+
+## Error Handling
+
+```python
+from smolvm import SmolVM
+from smolvm.exceptions import SmolVMError, OperationTimeoutError
+
+try:
+    with SmolVM(mem_size_mib=512) as vm:
+        result = vm.run("some-command", timeout=10)
+        if not result.ok:
+            print(f"Command failed: {result.stderr}")
+except OperationTimeoutError as e:
+    print(f"Operation timed out: {e.message}")
+except SmolVMError as e:
+    print(f"VM error: {e}")
+```
+
+## VM Properties
+
+```python
+with SmolVM() as vm:
+    # Unique identifier
+    print(vm.vm_id)
+    
+    # Current status (VMState enum)
+    print(vm.status)  # VMState.RUNNING
+    
+    # Full VM information
+    print(vm.info)  # VMInfo object
+    
+    # Guest IP address
+    print(vm.get_ip())
+    
+    # Data directory
+    print(vm.data_dir)
+    
+    # Check if commands can be executed
+    print(vm.can_run_commands())  # True for SSH-capable VMs
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Command Execution" icon="terminal" href="/guides/command-execution">
+    Learn how to run commands inside VMs via SSH
+  </Card>
+  <Card title="Environment Variables" icon="gear" href="/guides/environment-variables">
+    Manage environment variables in running VMs
+  </Card>
+  <Card title="Reconnecting VMs" icon="link" href="/guides/reconnecting-vms">
+    Reconnect to existing VMs for persistent workflows
+  </Card>
+  <Card title="Custom Images" icon="box" href="/guides/custom-images">
+    Build custom rootfs images with ImageBuilder
+  </Card>
+</CardGroup>

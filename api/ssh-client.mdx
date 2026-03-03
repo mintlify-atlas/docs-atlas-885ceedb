@@ -1,0 +1,316 @@
+---
+title: SSHClient
+description: Execute commands on microVM guests via persistent SSH connections
+---
+
+## Overview
+
+`SSHClient` manages persistent SSH connections to SmolVM guests using [paramiko](https://www.paramiko.org/). It maintains a single TCP connection that is established lazily on first use and reused for all subsequent commands, eliminating the ~170ms overhead of forking a new `ssh` process per call.
+
+## Class Definition
+
+```python
+from smolvm.ssh import SSHClient
+```
+
+## Constructor
+
+```python
+SSHClient(
+    host: str,
+    user: str = "root",
+    port: int = 22,
+    key_path: str | None = None,
+    password: str | None = None,
+    connect_timeout: int = 10,
+)
+```
+
+### Parameters
+
+<ParamField path="host" type="str" required>
+  Guest IP address or hostname.
+
+  Cannot be empty.
+</ParamField>
+
+<ParamField path="user" type="str" default="root">
+  SSH username for authentication.
+
+  Cannot be empty.
+</ParamField>
+
+<ParamField path="port" type="int" default="22">
+  SSH port on the guest.
+
+  Must be between 1 and 65535.
+</ParamField>
+
+<ParamField path="key_path" type="str | None" default="None">
+  Optional path to an SSH private key file for authentication.
+
+  Takes precedence over password-based authentication.
+</ParamField>
+
+<ParamField path="password" type="str | None" default="None">
+  Optional password for authentication.
+
+  Used only if `key_path` is not provided.
+</ParamField>
+
+<ParamField path="connect_timeout" type="int" default="10">
+  Seconds to wait for the initial TCP connection.
+
+  Must be >= 1.
+</ParamField>
+
+## Methods
+
+### wait_for_ssh
+
+```python
+def wait_for_ssh(
+    self,
+    timeout: float = 60.0,
+    interval: float = 0.1
+) -> None
+```
+
+Wait for the SSH daemon to become reachable on the guest.
+
+Uses a two-phase approach for fast detection:
+
+1. **TCP probe** - Lightweight `socket.connect()` calls (~1ms each) to detect when sshd is listening
+2. **Paramiko connect** - Full SSH handshake + authentication. The connection is kept open for subsequent `run()` calls.
+
+#### Parameters
+
+<ParamField path="timeout" type="float" default="60.0">
+  Maximum seconds to wait for SSH to become available.
+
+  Must be > 0.
+</ParamField>
+
+<ParamField path="interval" type="float" default="0.1">
+  Seconds between TCP probe attempts during phase 1.
+</ParamField>
+
+#### Raises
+
+- `OperationTimeoutError`: If SSH does not become available within timeout seconds
+- `ValueError`: If timeout is less than or equal to 0
+
+#### Example
+
+```python
+from smolvm.ssh import SSHClient
+
+client = SSHClient(host="172.16.0.2")
+client.wait_for_ssh(timeout=30.0)
+print("SSH is ready!")
+```
+
+### run
+
+```python
+def run(
+    self,
+    command: str,
+    timeout: int = 30,
+    shell: ShellMode = "login",
+) -> CommandResult
+```
+
+Execute a command on the guest VM via the persistent SSH connection.
+
+If the connection is not yet established or has been lost, it is (re)created transparently.
+
+#### Parameters
+
+<ParamField path="command" type="str" required>
+  Shell command to execute on the guest.
+
+  Cannot be empty or whitespace-only.
+</ParamField>
+
+<ParamField path="timeout" type="int" default="30">
+  Maximum seconds to wait for the command to complete.
+
+  Must be >= 1.
+</ParamField>
+
+<ParamField path="shell" type="ShellMode" default="login">
+  Command execution mode:
+
+  - `"login"` (default): Run via guest login shell (sources profile, bashrc, etc.)
+  - `"raw"`: Execute command directly with no shell wrapping
+</ParamField>
+
+#### Returns
+
+<ResponseField name="CommandResult" type="CommandResult">
+  Result object containing:
+
+  - `exit_code` (int): Exit code of the command (0 = success)
+  - `stdout` (str): Standard output captured from the command
+  - `stderr` (str): Standard error captured from the command
+  - `ok` (bool): Property returning `True` if exit_code == 0
+  - `output` (str): Property returning `stdout.strip()`
+</ResponseField>
+
+#### Raises
+
+- `ValueError`: If command is empty or timeout < 1
+- `OperationTimeoutError`: If the command exceeds timeout
+- `SmolVMError`: If the SSH connection cannot be established
+
+#### Example
+
+```python
+from smolvm.ssh import SSHClient
+
+client = SSHClient(host="172.16.0.2")
+client.wait_for_ssh()
+
+# Run a simple command
+result = client.run("whoami")
+print(f"Output: {result.output}")  # "root"
+print(f"Success: {result.ok}")     # True
+
+# Run with custom timeout
+result = client.run("sleep 5 && echo done", timeout=10)
+
+# Execute in raw mode (no login shell)
+result = client.run("echo $HOME", shell="raw")
+```
+
+### close
+
+```python
+def close(self) -> None
+```
+
+Close the SSH connection and release resources.
+
+Safe to call multiple times. Suppresses any exceptions during closure.
+
+#### Example
+
+```python
+client = SSHClient(host="172.16.0.2")
+try:
+    client.wait_for_ssh()
+    result = client.run("ls")
+finally:
+    client.close()
+```
+
+## Properties
+
+### connected
+
+```python
+@property
+def connected(self) -> bool
+```
+
+Check if the SSH connection is currently alive.
+
+Returns `True` if a connection exists and its transport is active, `False` otherwise.
+
+#### Example
+
+```python
+client = SSHClient(host="172.16.0.2")
+print(client.connected)  # False
+
+client.wait_for_ssh()
+print(client.connected)  # True
+
+client.close()
+print(client.connected)  # False
+```
+
+## Complete Example
+
+```python
+from smolvm import VM
+from smolvm.ssh import SSHClient
+
+# Using SSHClient directly
+client = SSHClient(
+    host="172.16.0.5",
+    user="root",
+    port=22,
+    connect_timeout=15
+)
+
+try:
+    # Wait for SSH to be available
+    client.wait_for_ssh(timeout=60.0)
+
+    # Execute multiple commands using the same connection
+    result = client.run("uname -a")
+    print(f"Kernel: {result.output}")
+
+    result = client.run("df -h")
+    if result.ok:
+        print(f"Disk usage:\n{result.stdout}")
+    else:
+        print(f"Error: {result.stderr}")
+
+    # Run a long-running command with extended timeout
+    result = client.run(
+        "apt-get update && apt-get install -y curl",
+        timeout=120
+    )
+
+finally:
+    client.close()
+
+# SSHClient is used internally by VM.run()
+with VM() as vm:
+    # This uses SSHClient under the hood
+    result = vm.run("echo 'Hello from SmolVM'")
+    print(result.output)
+```
+
+## Authentication Methods
+
+### Private Key Authentication
+
+```python
+client = SSHClient(
+    host="172.16.0.2",
+    key_path="/path/to/private/key"
+)
+```
+
+### Password Authentication
+
+```python
+client = SSHClient(
+    host="172.16.0.2",
+    password="secret123"
+)
+```
+
+### Default Key/Agent Fallback
+
+```python
+# If neither key_path nor password is provided,
+# SSHClient will try the SSH agent and default keys
+client = SSHClient(host="172.16.0.2")
+```
+
+## Performance Notes
+
+- The persistent connection eliminates ~170ms of overhead per command compared to spawning `ssh` processes
+- `wait_for_ssh()` uses fast TCP probes (~1ms each) before attempting the full SSH handshake
+- Connections are automatically re-established if they die between commands
+- For maximum efficiency, keep the client alive and reuse it for multiple commands
+
+## Related
+
+- [CommandResult](/api/command-result) - Command execution result type
+- [SmolVM.run()](/api/smolvm) - High-level command execution that uses SSHClient internally

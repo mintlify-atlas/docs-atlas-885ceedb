@@ -1,0 +1,460 @@
+---
+title: "SmolVM"
+description: "High-level interface for a single microVM with auto-configuration support"
+---
+
+## Overview
+
+The `SmolVM` class provides a user-friendly interface for creating and managing microVMs. It wraps the lower-level `SmolVMManager` and provides an instance-style API with context manager support.
+
+**Key Features:**
+- Auto-configuration mode for SSH-ready VMs
+- Context manager support with automatic lifecycle management
+- Lazy SSH connection with automatic fallback
+- Environment variable injection and management
+- Localhost port forwarding with dual transport (nftables/SSH tunnel)
+
+## Constructor
+
+```python
+SmolVM(
+    config: VMConfig | None = None,
+    *,
+    vm_id: str | None = None,
+    data_dir: Path | None = None,
+    socket_dir: Path | None = None,
+    backend: str | None = None,
+    mem_size_mib: int | None = None,
+    disk_size_mib: int | None = None,
+    ssh_user: str = "root",
+    ssh_key_path: str | None = None,
+)
+```
+
+### Parameters
+
+<ParamField path="config" type="VMConfig | None" default="None">
+  VM configuration. Mutually exclusive with `vm_id`. If omitted (and `vm_id` is omitted), SmolVM auto-creates a default SSH-capable VM configuration.
+</ParamField>
+
+<ParamField path="vm_id" type="str | None" default="None">
+  ID of an existing VM to reconnect to. Mutually exclusive with `config`.
+</ParamField>
+
+<ParamField path="data_dir" type="Path | None" default="None">
+  Override the default data directory.
+</ParamField>
+
+<ParamField path="socket_dir" type="Path | None" default="None">
+  Override the default socket directory.
+</ParamField>
+
+<ParamField path="backend" type="str | None" default="None">
+  Runtime backend override: `"firecracker"`, `"qemu"`, or `"auto"`.
+</ParamField>
+
+<ParamField path="mem_size_mib" type="int | None" default="None">
+  Guest memory in MiB for auto-config mode (only when both `config` and `vm_id` are omitted). Defaults to 512.
+</ParamField>
+
+<ParamField path="disk_size_mib" type="int | None" default="None">
+  Root filesystem size in MiB for auto-config mode (only when both `config` and `vm_id` are omitted). Defaults to 512. Must be >= 64.
+</ParamField>
+
+<ParamField path="ssh_user" type="str" default="root">
+  SSH user for `run()` method.
+</ParamField>
+
+<ParamField path="ssh_key_path" type="str | None" default="None">
+  Optional SSH private key path. If omitted, SmolVM first tries default SSH auth, then falls back to `~/.smolvm/keys/id_ed25519` when needed.
+</ParamField>
+
+### Raises
+
+- `ValueError`: If both `config` and `vm_id` are provided, or if `mem_size_mib`/`disk_size_mib` are set when not in auto-config mode.
+
+### Example
+
+<CodeGroup>
+```python Auto-config Mode
+from smolvm import SmolVM
+
+# Create an auto-configured SSH-ready VM
+with SmolVM() as vm:
+    result = vm.run("uname -r")
+    print(result.stdout)
+```
+
+```python Custom Config
+from smolvm import SmolVM, VMConfig
+from pathlib import Path
+
+config = VMConfig(
+    vm_id="my-vm",
+    vcpu_count=2,
+    mem_size_mib=1024,
+    kernel_path=Path("/path/to/kernel"),
+    rootfs_path=Path("/path/to/rootfs.ext4"),
+    boot_args="console=ttyS0 reboot=k panic=1 init=/init",
+)
+
+with SmolVM(config) as vm:
+    print(f"VM IP: {vm.get_ip()}")
+```
+
+```python Reconnect to Existing VM
+from smolvm import SmolVM
+
+# Reconnect to an existing VM
+vm = SmolVM(vm_id="my-vm")
+result = vm.run("hostname")
+print(result.stdout)
+```
+</CodeGroup>
+
+## Class Methods
+
+### from_id
+
+```python
+@classmethod
+def from_id(
+    cls,
+    vm_id: str,
+    *,
+    data_dir: Path | None = None,
+    socket_dir: Path | None = None,
+    backend: str | None = None,
+    ssh_user: str = "root",
+    ssh_key_path: str | None = None,
+) -> SmolVM
+```
+
+Reconnect to an existing VM by ID.
+
+<ParamField path="vm_id" type="str" required>
+  VM identifier.
+</ParamField>
+
+<ParamField path="data_dir" type="Path | None" default="None">
+  Override the default data directory.
+</ParamField>
+
+<ParamField path="socket_dir" type="Path | None" default="None">
+  Override the default socket directory.
+</ParamField>
+
+<ParamField path="backend" type="str | None" default="None">
+  Runtime backend override.
+</ParamField>
+
+<ParamField path="ssh_user" type="str" default="root">
+  SSH user for `run()` method.
+</ParamField>
+
+<ParamField path="ssh_key_path" type="str | None" default="None">
+  Optional SSH private key path.
+</ParamField>
+
+**Returns:** A `SmolVM` instance bound to the existing VM.
+
+**Raises:** `VMNotFoundError` if no VM with this ID exists.
+
+## Lifecycle Methods
+
+### start
+
+```python
+def start(self, boot_timeout: float = 30.0) -> SmolVM
+```
+
+Start the VM. If the VM config contains `env_vars`, they are injected into the guest via SSH after boot completes.
+
+<ParamField path="boot_timeout" type="float" default="30.0">
+  Maximum seconds to wait for boot.
+</ParamField>
+
+**Returns:** `self` for method chaining.
+
+**Raises:**
+- `SmolVMError`: If `env_vars` is set but the image does not support SSH (missing `init=/init` in boot args).
+
+### stop
+
+```python
+def stop(self, timeout: float = 3.0) -> SmolVM
+```
+
+Stop the VM.
+
+<ParamField path="timeout" type="float" default="3.0">
+  Seconds to wait for graceful shutdown.
+</ParamField>
+
+**Returns:** `self` for method chaining.
+
+### delete
+
+```python
+def delete(self) -> None
+```
+
+Delete the VM and release all resources.
+
+## Command Execution
+
+### run
+
+```python
+def run(
+    self,
+    command: str,
+    timeout: int = 30,
+    shell: Literal["login", "raw"] = "login",
+) -> CommandResult
+```
+
+Execute a command on the guest via SSH. Lazily creates an SSH client on first call and reuses it for subsequent invocations.
+
+<ParamField path="command" type="str" required>
+  Shell command to execute.
+</ParamField>
+
+<ParamField path="timeout" type="int" default="30">
+  Maximum seconds to wait for the command.
+</ParamField>
+
+<ParamField path="shell" type="Literal['login', 'raw']" default="login">
+  Command execution mode:
+  - `"login"` (default): run via guest login shell
+  - `"raw"`: execute command directly with no shell wrapping
+</ParamField>
+
+**Returns:** `CommandResult` with `exit_code`, `stdout`, and `stderr`.
+
+**Raises:**
+- `SmolVMError`: If the VM is not running or has no network.
+- `CommandExecutionUnavailableError`: If SSH is not available.
+
+```python Example
+result = vm.run("ls -la /tmp")
+if result.exit_code == 0:
+    print(result.stdout)
+else:
+    print(f"Error: {result.stderr}")
+```
+
+### wait_for_ssh
+
+```python
+def wait_for_ssh(self, timeout: float = 60.0) -> SmolVM
+```
+
+Wait for SSH to become available on the guest.
+
+<ParamField path="timeout" type="float" default="60.0">
+  Maximum seconds to wait.
+</ParamField>
+
+**Returns:** `self` for method chaining.
+
+**Raises:**
+- `OperationTimeoutError`: If SSH is not available in time.
+- `SmolVMError`: If the VM is not running.
+
+### ssh_commands
+
+```python
+def ssh_commands(
+    self,
+    *,
+    ssh_user: str | None = None,
+    key_path: str | Path | None = None,
+    public_host: str | None = None,
+) -> dict[str, str]
+```
+
+Get ready-to-run SSH commands for this VM.
+
+**Returns:** Dictionary with keys like `"private_ip"`, `"localhost_port"`, and optionally `"public"`.
+
+## Environment Variables
+
+### set_env_vars
+
+```python
+def set_env_vars(self, env_vars: dict[str, str], *, merge: bool = True) -> list[str]
+```
+
+Set environment variables on a running VM. Variables are persisted in `/etc/profile.d/smolvm_env.sh` and affect new SSH sessions/login shells.
+
+<ParamField path="env_vars" type="dict[str, str]" required>
+  Key/value pairs to set.
+</ParamField>
+
+<ParamField path="merge" type="bool" default="True">
+  If True, merge with existing variables.
+</ParamField>
+
+**Returns:** Sorted variable names present after update.
+
+### unset_env_vars
+
+```python
+def unset_env_vars(self, keys: list[str]) -> dict[str, str]
+```
+
+Remove environment variables from a running VM.
+
+<ParamField path="keys" type="list[str]" required>
+  Variable names to remove.
+</ParamField>
+
+**Returns:** Mapping of removed keys to their previous values.
+
+### list_env_vars
+
+```python
+def list_env_vars(self) -> dict[str, str]
+```
+
+Return SmolVM-managed environment variables for a running VM.
+
+**Returns:** Dictionary of environment variable key/value pairs.
+
+## Port Forwarding
+
+### expose_local
+
+```python
+def expose_local(self, guest_port: int, host_port: int | None = None) -> int
+```
+
+Expose a guest TCP port on localhost only. Forwards `127.0.0.1:<host_port>` on the host to `<guest_ip>:<guest_port>` inside the VM.
+
+<ParamField path="guest_port" type="int" required>
+  Guest TCP port to expose.
+</ParamField>
+
+<ParamField path="host_port" type="int | None" default="None">
+  Host localhost port. If omitted, an available port is chosen.
+</ParamField>
+
+**Returns:** The host localhost port to connect to.
+
+```python Example
+# Expose a web server running on guest port 8080
+host_port = vm.expose_local(guest_port=8080)
+print(f"Access at: http://localhost:{host_port}")
+```
+
+### unexpose_local
+
+```python
+def unexpose_local(self, host_port: int, guest_port: int) -> SmolVM
+```
+
+Remove a previously configured localhost-only port forward.
+
+<ParamField path="host_port" type="int" required>
+  Host localhost port (1-65535).
+</ParamField>
+
+<ParamField path="guest_port" type="int" required>
+  Guest TCP port (1-65535).
+</ParamField>
+
+**Returns:** `self` for method chaining.
+
+## Properties
+
+### vm_id
+
+```python
+@property
+def vm_id(self) -> str
+```
+
+The VM identifier.
+
+### info
+
+```python
+@property
+def info(self) -> VMInfo
+```
+
+Current VM runtime information (cached; call `refresh()` to update).
+
+### status
+
+```python
+@property
+def status(self) -> VMState
+```
+
+Current VM lifecycle state (cached).
+
+### data_dir
+
+```python
+@property
+def data_dir(self) -> Path
+```
+
+Directory backing the VM state DB and logs.
+
+## Utility Methods
+
+### get_ip
+
+```python
+def get_ip(self) -> str
+```
+
+Return the guest IP address.
+
+**Raises:** `SmolVMError` if the VM has no network configuration.
+
+### refresh
+
+```python
+def refresh(self) -> SmolVM
+```
+
+Refresh cached VM info from the state store.
+
+**Returns:** `self` for method chaining.
+
+### can_run_commands
+
+```python
+def can_run_commands(self) -> bool
+```
+
+Whether this VM config supports command execution via SSH. Command execution currently requires SmolVM's SSH init flow, which is enabled by booting with `init=/init`.
+
+**Returns:** `True` if the VM supports `run()`, `False` otherwise.
+
+### close
+
+```python
+def close(self) -> None
+```
+
+Release underlying SDK resources for this facade instance.
+
+## Context Manager
+
+The `SmolVM` class implements the context manager protocol:
+
+```python
+with SmolVM() as vm:
+    # VM auto-starts on context entry
+    result = vm.run("echo 'Hello'")
+    # VM auto-stops and deletes on context exit
+```
+
+**Behavior:**
+- **`__enter__`**: Auto-starts VMs created by this facade instance (not reconnected VMs)
+- **`__exit__`**: Best-effort stop and auto-delete for VMs created by this instance

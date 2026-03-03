@@ -1,0 +1,381 @@
+---
+title: smolvm ui
+description: Start the SmolVM dashboard UI server for web-based VM management
+---
+
+## Overview
+
+The `smolvm ui` command launches a web-based dashboard for managing SmolVM instances. The dashboard provides a graphical interface for monitoring VMs, viewing logs, and performing common operations.
+
+<Note>
+  The dashboard requires the `dashboard` extra to be installed: `pip install 'smolvm[dashboard]'`
+</Note>
+
+## Basic Usage
+
+```bash
+smolvm ui
+```
+
+This starts the dashboard on `http://127.0.0.1:8080`.
+
+## Command Syntax
+
+```bash
+smolvm ui [--host HOST] [--port PORT] [--allow-beta]
+```
+
+## Options
+
+<ParamField path="--host" type="string" default="127.0.0.1">
+  Bind host for the web server. Use `0.0.0.0` to allow external connections.
+</ParamField>
+
+<ParamField path="--port" type="integer" default={8080}>
+  Port number to listen on. Must be between 1-65535.
+</ParamField>
+
+<ParamField path="--allow-beta" type="boolean" default={false}>
+  Allow downloading dashboard UI assets from prerelease/beta GitHub tags. Useful for testing unreleased features.
+</ParamField>
+
+## Examples
+
+### Start on Default Port
+
+```bash
+smolvm ui
+```
+
+```
+Starting SmolVM UI on http://127.0.0.1:8080 ...
+Once started, open http://localhost:8080 in your browser.
+INFO:     Started server process [12345]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8080 (Press CTRL+C to quit)
+```
+
+### Use Custom Port
+
+```bash
+smolvm ui --port 3000
+```
+
+```
+Starting SmolVM UI on http://127.0.0.1:3000 ...
+Once started, open http://localhost:3000 in your browser.
+```
+
+### Allow External Connections
+
+Bind to all interfaces to accept connections from other machines:
+
+```bash
+smolvm ui --host 0.0.0.0 --port 8080
+```
+
+```
+Starting SmolVM UI on http://0.0.0.0:8080 ...
+Once started, open http://localhost:8080 in your browser.
+INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
+```
+
+<Note>
+  When binding to `0.0.0.0` or `::`, the CLI displays `localhost` in the URL for convenience. Access from other machines using the server's actual IP address.
+</Note>
+
+### Enable Beta Features
+
+Allow the dashboard to download prerelease UI assets:
+
+```bash
+smolvm ui --allow-beta
+```
+
+```
+Starting SmolVM UI on http://127.0.0.1:8080 ...
+Once started, open http://localhost:8080 in your browser.
+Using prerelease dashboard UI assets (--allow-beta enabled).
+```
+
+## Requirements
+
+The dashboard has additional dependencies beyond the core SmolVM package:
+
+```bash
+pip install 'smolvm[dashboard]'
+```
+
+This installs:
+- `fastapi>=0.115.0` - Web framework
+- `uvicorn[standard]>=0.34.0` - ASGI server
+- `websockets>=14.0` - WebSocket support
+
+If you try to run `smolvm ui` without these dependencies:
+
+```bash
+smolvm ui
+```
+
+```
+Error: Dashboard dependencies are not installed. Install with: pip install 'smolvm[dashboard]'
+```
+
+Exit code: `1`
+
+## Dashboard Features
+
+The SmolVM dashboard provides:
+
+- **VM List**: View all running and stopped VMs
+- **VM Details**: Inspect VM configuration, IP addresses, and status
+- **Logs**: Real-time log streaming from VMs
+- **Resource Monitoring**: CPU, memory, and network usage
+- **Quick Actions**: Start, stop, restart, and delete VMs
+- **SSH Access**: Web-based terminal (coming soon)
+
+## Port Validation
+
+The port must be a valid TCP port number (1-65535):
+
+```bash
+smolvm ui --port 0
+```
+
+```
+Error: invalid port 0. Expected 1-65535.
+```
+
+```bash
+smolvm ui --port 99999
+```
+
+```
+Error: invalid port 99999. Expected 1-65535.
+```
+
+Exit code: `2` (invalid usage)
+
+## Environment Variables
+
+The `smolvm ui` command sets environment variables for the dashboard server:
+
+<ParamField path="SMOLVM_DASHBOARD_ALLOW_BETA" type="string">
+  Set to `"1"` when `--allow-beta` is enabled. The dashboard checks this variable to determine whether to download beta UI assets.
+</ParamField>
+
+<ParamField path="SMOLVM_DASHBOARD_URL" type="string">
+  Set to the dashboard URL (e.g., `http://localhost:8080`). Used by the dashboard to construct links and API endpoints.
+</ParamField>
+
+These variables are automatically managed and restored when the server stops.
+
+## Stopping the Server
+
+Press `Ctrl+C` to stop the dashboard:
+
+```bash
+smolvm ui
+```
+
+```
+Starting SmolVM UI on http://127.0.0.1:8080 ...
+INFO:     Uvicorn running on http://127.0.0.1:8080 (Press CTRL+C to quit)
+^C
+INFO:     Shutting down
+INFO:     Finished server process [12345]
+```
+
+Exit code: `130` (interrupted by Ctrl+C)
+
+## Exit Codes
+
+- **0**: Server started and stopped cleanly
+- **1**: Error starting server (missing dependencies, port in use, etc.)
+- **2**: Invalid usage (invalid port number)
+- **130**: Interrupted by user (Ctrl+C)
+
+## Common Issues
+
+### Port Already in Use
+
+If the port is already occupied:
+
+```bash
+smolvm ui --port 8080
+```
+
+```
+Starting SmolVM UI on http://127.0.0.1:8080 ...
+ERROR:    [Errno 48] Address already in use
+Error: failed to start UI: [Errno 48] Address already in use
+```
+
+**Solution**: Use a different port:
+
+```bash
+smolvm ui --port 8081
+```
+
+Or identify and stop the process using the port:
+
+```bash
+# Linux
+sudo lsof -i :8080
+sudo kill <PID>
+
+# macOS
+sudo lsof -i :8080
+sudo kill <PID>
+```
+
+### Permission Denied on Low Ports
+
+Ports below 1024 require root privileges:
+
+```bash
+smolvm ui --port 80
+```
+
+```
+ERROR:    [Errno 13] Permission denied
+Error: failed to start UI: [Errno 13] Permission denied
+```
+
+**Solution**: Use a higher port (1024+) or run with sudo:
+
+```bash
+sudo smolvm ui --port 80
+```
+
+### Missing Dashboard Dependencies
+
+If the dashboard package is not installed:
+
+```bash
+smolvm ui
+```
+
+```
+Error: Dashboard dependencies are not installed. Install with: pip install 'smolvm[dashboard]'
+```
+
+**Solution**: Install the dashboard extra:
+
+```bash
+pip install 'smolvm[dashboard]'
+```
+
+## Accessing the Dashboard
+
+Once the server is running, open the provided URL in your browser:
+
+```bash
+smolvm ui
+```
+
+```
+Starting SmolVM UI on http://127.0.0.1:8080 ...
+Once started, open http://localhost:8080 in your browser.
+```
+
+Navigate to `http://localhost:8080` to access the dashboard.
+
+### From Remote Machines
+
+If you started the server with `--host 0.0.0.0`, access it from other machines using the server's IP:
+
+```bash
+# On server
+smolvm ui --host 0.0.0.0 --port 8080
+
+# From remote machine
+# Open http://<server-ip>:8080 in browser
+```
+
+## Production Deployment
+
+For production use, consider:
+
+1. **Reverse Proxy**: Use nginx or Apache as a reverse proxy
+2. **TLS/SSL**: Enable HTTPS for encrypted connections
+3. **Authentication**: Add authentication middleware
+4. **Firewall**: Restrict access to trusted networks
+
+### Example with nginx
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name smolvm.example.com;
+
+    ssl_certificate /etc/ssl/certs/smolvm.crt;
+    ssl_certificate_key /etc/ssl/private/smolvm.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+Start SmolVM UI on localhost only:
+
+```bash
+smolvm ui --host 127.0.0.1 --port 8080
+```
+
+## Development Mode
+
+For dashboard development, use the `--allow-beta` flag to test unreleased UI features:
+
+```bash
+smolvm ui --allow-beta --port 3000
+```
+
+This allows the dashboard to download prerelease assets from GitHub.
+
+## API Endpoints
+
+The dashboard exposes a REST API for programmatic access. Key endpoints:
+
+- `GET /api/vms` - List all VMs
+- `GET /api/vms/{vm_id}` - Get VM details
+- `POST /api/vms` - Create a new VM
+- `DELETE /api/vms/{vm_id}` - Delete a VM
+- `POST /api/vms/{vm_id}/start` - Start a VM
+- `POST /api/vms/{vm_id}/stop` - Stop a VM
+
+Example using curl:
+
+```bash
+# List VMs
+curl http://localhost:8080/api/vms
+
+# Get VM details
+curl http://localhost:8080/api/vms/my-vm
+
+# Delete VM
+curl -X DELETE http://localhost:8080/api/vms/my-vm
+```
+
+## WebSocket Support
+
+The dashboard uses WebSockets for real-time updates:
+
+- Log streaming
+- Resource monitoring
+- VM status changes
+
+Ensure your reverse proxy supports WebSocket upgrades if deploying behind a proxy.
+
+## See Also
+
+- [CLI Overview](/cli/overview) - General CLI usage
+- [SmolVM Manager API](/api/smolvm-manager) - VM management API
+- [Basic Usage Guide](/guides/basic-usage) - Working with VMs

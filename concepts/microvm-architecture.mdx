@@ -1,0 +1,173 @@
+---
+title: 'MicroVM Architecture'
+description: 'Understanding SmolVM microVM architecture and how it differs from containers'
+icon: 'cubes'
+---
+
+## What is a MicroVM?
+
+A microVM is a lightweight virtual machine that combines the security benefits of traditional VMs with the speed and resource efficiency of containers. SmolVM leverages microVMs to provide hardware-isolated sandboxes for AI agents and untrusted code execution.
+
+### MicroVMs vs Containers
+
+Think of the security difference this way:
+
+- **Containers** are like separate apartments in the same building—they share the same foundation (kernel) but have separate living spaces
+- **MicroVMs** are like separate houses with their own foundations—each has its own kernel and complete isolation
+
+<CardGroup cols={2}>
+  <Card title="Containers" icon="box">
+    - Share host kernel
+    - Process-level isolation
+    - Faster startup (~100ms)
+    - Smaller attack surface to host
+  </Card>
+  <Card title="MicroVMs" icon="shield-halved">
+    - Own guest kernel (KVM/HVF)
+    - Hardware virtualization
+    - Fast startup (~500ms)
+    - Strong isolation boundary
+  </Card>
+</CardGroup>
+
+## Why MicroVMs for AI Agents?
+
+When AI agents generate and execute code, you need stronger isolation than containers provide:
+
+<Warning>
+  **Security Risk**: LLM-generated code can be unpredictable. A malicious or buggy container escape could compromise your host system. Hardware virtualization makes kernel exploits orders of magnitude harder.
+</Warning>
+
+### Isolation Layers
+
+SmolVM provides multiple layers of defense:
+
+1. **Hardware Virtualization (KVM/HVF)**: Each VM runs with its own kernel in a separate memory space
+2. **Minimal Attack Surface**: Firecracker/QEMU are purpose-built with minimal device emulation
+3. **Network Isolation**: Dedicated TAP devices with firewall rules prevent VM-to-VM communication
+4. **Ephemeral by Default**: Fresh rootfs per VM means no state persistence between runs
+
+## Firecracker MicroVMs
+
+SmolVM's default backend on Linux is [Firecracker](https://firecracker-microvm.github.io/), an open-source VMM (Virtual Machine Monitor) built by AWS specifically for serverless workloads.
+
+### Key Characteristics
+
+- **Minimal Device Model**: Only virtio devices (network, block, vsock)
+- **Fast Boot**: Sub-second initialization through aggressive optimization
+- **KVM-Backed**: Requires Linux with KVM support (`/dev/kvm`)
+- **Memory Efficient**: ~5MB overhead per VM
+- **Designed for Multi-Tenancy**: Used in production by AWS Lambda and Fargate
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────┐
+│          Host System (Linux)            │
+│                                         │
+│  ┌───────────────────────────────────┐  │
+│  │     SmolVM Orchestrator (Python)  │  │
+│  │  - VM lifecycle management        │  │
+│  │  - SSH client                     │  │
+│  │  - State tracking (SQLite)        │  │
+│  └────────────┬──────────────────────┘  │
+│               │                          │
+│  ┌────────────▼──────────────────────┐  │
+│  │   Firecracker Process (VMM)       │  │
+│  │  - API Server (Unix socket)       │  │
+│  │  - TAP device: tap-smol-xyz       │  │
+│  └────────────┬──────────────────────┘  │
+│               │                          │
+│       ┌───────▼───────┐                 │
+│       │   KVM (/dev/kvm)                │
+│       │   Hardware virtualization       │
+│       └───────┬───────┘                 │
+│               │                          │
+│  ┌────────────▼──────────────────────┐  │
+│  │      Guest VM (microVM)           │  │
+│  │  ┌─────────────────────────────┐  │  │
+│  │  │  Debian Rootfs              │  │  │
+│  │  │  - Python, Node.js, tools   │  │  │
+│  │  │  - SSH server               │  │  │
+│  │  │  - Guest IP: 172.16.0.x     │  │  │
+│  │  └─────────────────────────────┘  │  │
+│  └───────────────────────────────────┘  │
+└─────────────────────────────────────────┘
+```
+
+### Communication Path
+
+When you call `vm.run("echo hello")`, here's what happens:
+
+1. **SmolVM SDK** sends SSH command over the network to `172.16.0.x:22`
+2. **TAP device** (`tap-smol-xyz`) routes packets from host to guest
+3. **Firecracker** emulates virtio-net device and forwards to guest kernel
+4. **Guest SSH server** executes the command and returns output
+5. **Response** flows back through the same path to your Python code
+
+<Info>
+  Command execution latency is ~43ms (p50) after SSH is established, measured on AMD Ryzen 7 7800X3D.
+</Info>
+
+## Performance Characteristics
+
+SmolVM is optimized for agent workflows with frequent create/destroy cycles:
+
+| Lifecycle Phase | Time (p50) |
+|----------------|------------|
+| Create + Start | ~572ms |
+| SSH Ready | ~2.1s |
+| Command Execution | **~43ms** |
+| Stop + Delete | ~751ms |
+| **Full Lifecycle** | **~3.5s** |
+
+<Note>
+  Benchmarks from `scripts/benchmarks/bench_subprocess.py` on Ubuntu Linux with KVM. macOS QEMU backend will have different characteristics.
+</Note>
+
+## Memory and Disk Footprint
+
+### Default Configuration
+
+- **Memory**: 512 MiB per VM (configurable via `mem_size_mib`)
+- **Disk**: 1024 MiB per VM (configurable via `disk_size_mib`)
+- **Firecracker overhead**: ~5 MB per VM process
+- **Host resources**: Can run 100+ VMs on a modern workstation
+
+### Disk Isolation
+
+SmolVM defaults to **isolated disk mode** (`disk_mode="isolated"`):
+
+- Each VM gets a **copy-on-write clone** of the base rootfs image
+- Changes are isolated per-VM and discarded on shutdown
+- Prevents cross-contamination between agent sessions
+
+```python
+from smolvm import SmolVM
+
+# Isolated disk (default) - each VM gets fresh rootfs
+with SmolVM(disk_mode="isolated") as vm:
+    vm.run("touch /tmp/file.txt")  # Lost after vm.stop()
+
+# Shared disk - all VMs share same rootfs (use carefully!)
+with SmolVM(disk_mode="shared") as vm:
+    vm.run("pip install requests")  # Persists for next VM
+```
+
+<Warning>
+  **Security Note**: Shared disk mode can leak data between VM sessions. Only use for development or when you fully control VM lifecycle.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Security Model" icon="lock" href="/concepts/security-model">
+    Learn about SmolVM's security boundaries and SSH trust model
+  </Card>
+  <Card title="Networking" icon="network-wired" href="/concepts/networking">
+    Deep dive into TAP devices, NAT, and port forwarding
+  </Card>
+  <Card title="Backends" icon="server" href="/concepts/backends">
+    Compare Firecracker and QEMU backends
+  </Card>
+</CardGroup>

@@ -1,0 +1,428 @@
+---
+title: 'Networking'
+description: 'Understanding SmolVM networking: TAP devices, NAT, IP allocation, and port forwarding'
+icon: 'network-wired'
+---
+
+## Overview
+
+SmolVM automatically configures host networking to give each VM internet access while maintaining isolation. The networking stack varies by backend but provides a consistent interface.
+
+## Network Topology
+
+### Firecracker Backend (Linux)
+
+```
+┌──────────────────────────────────────────────────────┐
+│                   Host System                        │
+│                                                      │
+│  ┌─────────────────────────────────────────────┐   │
+│  │         SmolVM Network Manager              │   │
+│  │  - Creates TAP devices                      │   │
+│  │  - Configures nftables NAT/firewall         │   │
+│  │  - Manages IP allocation (172.16.0.0/16)    │   │
+│  └─────────────────┬───────────────────────────┘   │
+│                    │                                │
+│  ┌─────────────────▼──────────┐  ┌──────────────┐  │
+│  │  tap-smol-abc (172.16.0.1) │  │  eth0/wlan0  │  │
+│  │  - Dedicated per VM        │  │  (internet)  │  │
+│  │  - Layer 2 bridge          │  │              │  │
+│  └─────────────┬──────────────┘  └──────▲───────┘  │
+│                │                          │          │
+│                │  ┌───────────────────────┘          │
+│                │  │  NAT (nftables)                  │
+│                │  │  - Masquerade outbound           │
+│                │  │  - Port forwarding               │
+│  ┌─────────────▼──▼──────────────────────────────┐  │
+│  │            Firecracker VMM                    │  │
+│  │  ┌────────────────────────────────────────┐   │  │
+│  │  │       Guest VM (microVM)               │   │  │
+│  │  │  ┌──────────────────────────────────┐  │   │  │
+│  │  │  │  eth0: 172.16.0.2/24             │  │   │  │
+│  │  │  │  Gateway: 172.16.0.1             │  │   │  │
+│  │  │  │  DNS: 8.8.8.8, 8.8.4.4           │  │   │  │
+│  │  │  └──────────────────────────────────┘  │   │  │
+│  │  └────────────────────────────────────────┘   │  │
+│  └──────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────┘
+```
+
+### QEMU Backend (macOS/Linux)
+
+```
+┌──────────────────────────────────────────────────────┐
+│                   Host System                        │
+│                                                      │
+│  ┌─────────────────────────────────────────────┐   │
+│  │         QEMU User Networking (SLIRP)        │   │
+│  │  - No TAP devices required                  │   │
+│  │  - Automatic NAT via QEMU                   │   │
+│  │  - SSH port forwarding (hostfwd)            │   │
+│  └─────────────────┬───────────────────────────┘   │
+│                    │                                │
+│  ┌─────────────────▼──────────┐  ┌──────────────┐  │
+│  │  localhost:random_port     │  │  eth0/en0    │  │
+│  │  - SSH to guest            │  │  (internet)  │  │
+│  └────────────────────────────┘  └──────────────┘  │
+│                                                     │
+│  ┌──────────────────────────────────────────────┐  │
+│  │            QEMU Process                      │  │
+│  │  ┌────────────────────────────────────────┐  │  │
+│  │  │       Guest VM                         │  │  │
+│  │  │  ┌──────────────────────────────────┐  │  │  │
+│  │  │  │  eth0: 10.0.2.15/24 (fixed)      │  │  │  │
+│  │  │  │  Gateway: 10.0.2.2               │  │  │  │
+│  │  │  │  DNS: 10.0.2.3                   │  │  │  │
+│  │  │  └──────────────────────────────────┘  │  │  │
+│  │  └────────────────────────────────────────┘  │  │
+│  └──────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────┘
+```
+
+## TAP Devices (Firecracker)
+
+### What is a TAP Device?
+
+A TAP (network tap) device is a virtual network interface that operates at Layer 2 (Ethernet):
+
+- **Virtual NIC**: Appears as a network interface on the host (like `eth0` or `wlan0`)
+- **Userspace I/O**: Firecracker reads/writes raw Ethernet frames to the TAP device
+- **Kernel routing**: Host kernel routes packets between TAP and physical interfaces
+
+<Info>
+  Think of TAP devices like virtual network cables. Firecracker plugs one end into the guest VM, and the host kernel plugs the other end into its routing table.
+</Info>
+
+### TAP Device Lifecycle
+
+From `src/smolvm/network.py:87`:
+
+```python
+def create_tap(self, tap_name: str, user: str | None = None) -> None:
+    """Create TAP device if missing."""
+    run_command(["ip", "tuntap", "add", tap_name, "mode", "tap", "user", user])
+```
+
+For each VM, SmolVM:
+
+1. **Creates** a TAP device: `tap-smol-{vm_id[:8]}`
+2. **Assigns** host IP: `172.16.0.1/24` (default)
+3. **Brings up** the interface: `ip link set {tap} up`
+4. **Adds route**: Guest IP → TAP device
+5. **Configures NAT**: nftables rules for internet access
+6. **Deletes** TAP device when VM is stopped
+
+<Note>
+  TAP devices require `CAP_NET_ADMIN` capability. The system setup script configures passwordless sudo for `ip` and `nft` commands.
+</Note>
+
+### Viewing TAP Devices
+
+While a VM is running:
+
+```bash
+# List all network interfaces
+ip link show | grep tap-smol
+
+# Show TAP device details
+ip addr show tap-smol-abc123
+
+# Example output:
+# tap-smol-abc123: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500
+#     link/ether fe:fc:00:00:00:01
+#     inet 172.16.0.1/24 scope global tap-smol-abc123
+```
+
+## IP Allocation
+
+### Firecracker: Dynamic Allocation
+
+SmolVM allocates IPs from the `172.16.0.0/16` private range (see `AGENTS.md:66`):
+
+- **Host IP**: `172.16.0.1` (TAP device side)
+- **Guest IP**: Auto-assigned from available pool (e.g., `172.16.0.2`, `172.16.0.3`, ...)
+- **Allocation**: Tracked in SQLite state database
+- **Reuse**: IPs are returned to the pool when VMs are destroyed
+
+```python
+from smolvm import SmolVM
+
+with SmolVM() as vm:
+    # Guest IP is auto-assigned
+    print(vm.network_config.guest_ip)  # e.g., "172.16.0.2"
+```
+
+### QEMU: Fixed IP
+
+QEMU user networking uses a fixed IP scheme (from `src/smolvm/vm.py:54`):
+
+- **Guest IP**: `10.0.2.15` (always the same)
+- **Gateway**: `10.0.2.2` (QEMU built-in gateway)
+- **DNS**: `10.0.2.3` (QEMU built-in DNS forwarder)
+
+This means you **cannot run multiple QEMU-based VMs simultaneously** that expect unique IPs.
+
+<Warning>
+  **QEMU Limitation**: Multiple concurrent VMs will have the same guest IP (`10.0.2.15`). This is generally fine for isolated workflows but prevents direct VM-to-VM communication.
+</Warning>
+
+## NAT (Network Address Translation)
+
+### How NAT Works
+
+NAT allows VMs with private IPs to access the internet:
+
+```
+Guest VM (172.16.0.2) → TAP device (172.16.0.1) → nftables NAT → eth0 (public IP)
+  Request: src=172.16.0.2:5000, dst=1.1.1.1:80
+  
+  ↓ NAT (masquerade)
+  
+  Outbound: src=<host_public_ip>:random_port, dst=1.1.1.1:80
+  
+  ↓ Response from 1.1.1.1
+  
+  Inbound: dst=<host_public_ip>:random_port
+  
+  ↓ NAT (reverse translation)
+  
+  Guest receives: src=1.1.1.1:80, dst=172.16.0.2:5000
+```
+
+### nftables Configuration
+
+From `src/smolvm/network.py:425`, SmolVM creates these rules:
+
+```bash
+# Enable IP forwarding
+sysctl net.ipv4.ip_forward=1
+
+# Create NAT table and chains
+nft add table ip smolvm_nat
+nft add chain ip smolvm_nat postrouting { type nat hook postrouting priority srcnat; }
+
+# Masquerade outbound traffic from VMs
+nft add rule ip smolvm_nat postrouting oifname "eth0" counter masquerade \
+  comment "smolvm:global:nat:masquerade:eth0"
+
+# Allow established connections back to VMs
+nft add table inet smolvm_filter
+nft add chain inet smolvm_filter forward { type filter hook forward priority filter; }
+nft add rule inet smolvm_filter forward ct state related,established counter accept \
+  comment "smolvm:global:forward:established"
+
+# Allow VM traffic to internet
+nft add rule inet smolvm_filter forward \
+  iifname "tap-smol-abc" oifname "eth0" counter accept \
+  comment "smolvm:nat:tap:tap-smol-abc:to:eth0"
+```
+
+<Info>
+  SmolVM uses **nftables** (modern Linux firewall) instead of iptables. All rules are tagged with comments for easy cleanup.
+</Info>
+
+## VM-to-VM Isolation
+
+By default, VMs **cannot** communicate with each other (see `src/smolvm/network.py:468`):
+
+```bash
+# Drop all traffic between TAP devices
+nft add rule inet smolvm_filter forward \
+  iifname "tap*" oifname "tap*" counter drop \
+  comment "smolvm:global:forward:tap-isolation"
+```
+
+This prevents:
+- Lateral movement between agent sessions
+- Data exfiltration via another VM
+- Accidental network conflicts
+
+<Warning>
+  **Security**: Even if a VM is compromised, it cannot attack other VMs on the same host. This is a key isolation guarantee.
+</Warning>
+
+## Port Forwarding
+
+SmolVM supports two types of port forwarding:
+
+### 1. SSH Port Forwarding (Automatic)
+
+Every VM automatically forwards a random host port to guest SSH (port 22):
+
+```python
+from smolvm import SmolVM
+
+with SmolVM() as vm:
+    # SmolVM automatically sets up:
+    # localhost:random_port → 172.16.0.2:22
+    print(vm.network_config.ssh_host_port)  # e.g., 34567
+```
+
+From `src/smolvm/network.py:476`, this creates nftables DNAT rules:
+
+```bash
+# Redirect external traffic
+nft add rule ip smolvm_nat prerouting \
+  iifname "eth0" tcp dport 34567 counter dnat to 172.16.0.2:22
+
+# Redirect localhost traffic (output chain)
+nft add rule ip smolvm_nat output \
+  ip daddr 127.0.0.1/32 tcp dport 34567 counter dnat to 172.16.0.2:22
+
+# SNAT for localhost connections (requires route_localnet)
+nft add rule ip smolvm_nat postrouting \
+  ip saddr 127.0.0.0/8 ip daddr 172.16.0.2/32 tcp dport 22 counter snat to 172.16.0.1
+```
+
+### 2. Application Port Forwarding (expose_local)
+
+Expose guest applications to the host:
+
+```python
+from smolvm import SmolVM
+
+with SmolVM() as vm:
+    # Start a web server in the guest
+    vm.run("python3 -m http.server 8080 &")
+    
+    # Expose guest:8080 to host:18080
+    host_port = vm.expose_local(guest_port=8080, host_port=18080)
+    
+    # Access from host browser
+    print(f"http://localhost:{host_port}")  # http://localhost:18080
+```
+
+This creates similar DNAT rules but for application ports (see `src/smolvm/network.py:564`).
+
+<Tabs>
+  <Tab title="nftables (Preferred)">
+    SmolVM tries nftables forwarding first (fastest, kernel-level):
+    
+    ```bash
+    nft add rule ip smolvm_nat output \
+      ip daddr 127.0.0.1/32 tcp dport 18080 counter dnat to 172.16.0.2:8080
+    ```
+    
+    **Pros**: Low latency, no extra processes
+    **Cons**: Requires `CAP_NET_ADMIN`
+  </Tab>
+  <Tab title="SSH Tunnel (Fallback)">
+    If nftables fails, SmolVM falls back to SSH tunneling:
+    
+    ```bash
+    ssh -L 18080:localhost:8080 root@172.16.0.2
+    ```
+    
+    **Pros**: Works without sudo, portable
+    **Cons**: Higher latency, extra SSH process
+  </Tab>
+</Tabs>
+
+## DNS Configuration
+
+### Firecracker
+
+Guest VMs use public DNS servers by default (configured in rootfs `/etc/resolv.conf`):
+
+```
+nameserver 8.8.8.8
+nameserver 8.8.4.4
+```
+
+You can customize this during image build or at runtime:
+
+```python
+vm.run("echo 'nameserver 1.1.1.1' > /etc/resolv.conf")
+```
+
+### QEMU
+
+QEMU provides a built-in DNS forwarder at `10.0.2.3` that proxies to host DNS.
+
+## Troubleshooting
+
+### VM Can't Access Internet
+
+<Steps>
+  <Step title="Check IP forwarding">
+    ```bash
+    cat /proc/sys/net/ipv4/ip_forward
+    # Should output: 1
+    ```
+  </Step>
+  <Step title="Verify NAT rules">
+    ```bash
+    sudo nft list table ip smolvm_nat
+    # Should show masquerade rule for your outbound interface
+    ```
+  </Step>
+  <Step title="Check default route in guest">
+    ```python
+    vm.run("ip route show")
+    # Should show: default via 172.16.0.1 dev eth0
+    ```
+  </Step>
+  <Step title="Test DNS resolution">
+    ```python
+    vm.run("ping -c 1 8.8.8.8")  # Test connectivity
+    vm.run("ping -c 1 google.com")  # Test DNS
+    ```
+  </Step>
+</Steps>
+
+### Port Forwarding Not Working
+
+<AccordionGroup>
+  <Accordion title="Check nftables rules exist">
+    ```bash
+    sudo nft list table ip smolvm_nat | grep "dport <your_port>"
+    ```
+    
+    If missing, the port forward wasn't created. Check logs for permission errors.
+  </Accordion>
+  
+  <Accordion title="Verify application is listening">
+    ```python
+    vm.run("netstat -tlnp | grep <guest_port>")
+    # Should show your application listening on 0.0.0.0:<guest_port>
+    ```
+  </Accordion>
+  
+  <Accordion title="Test from host">
+    ```bash
+    curl http://localhost:<host_port>
+    ```
+    
+    If this fails but guest app is running, check firewall rules.
+  </Accordion>
+</AccordionGroup>
+
+### TAP Device Permission Denied
+
+```
+Error: Operation not permitted (creating TAP device)
+```
+
+<Warning>
+  TAP device creation requires root or `CAP_NET_ADMIN`. Run the system setup script:
+  
+  ```bash
+  sudo ./scripts/system-setup.sh --configure-runtime
+  ```
+  
+  This configures passwordless sudo for `ip` and `nft` commands.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Port Forwarding Guide" icon="arrow-right-arrow-left" href="/guides/port-forwarding">
+    Advanced port forwarding patterns for web apps and services
+  </Card>
+  <Card title="Security Model" icon="lock" href="/concepts/security-model">
+    Understand security implications of the networking setup
+  </Card>
+  <Card title="Backends" icon="server" href="/concepts/backends">
+    Compare Firecracker and QEMU networking approaches
+  </Card>
+</CardGroup>

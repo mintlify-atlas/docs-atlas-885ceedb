@@ -1,0 +1,100 @@
+---
+title: NetworkConfig
+description: Network configuration dataclass for microVMs
+---
+
+## Overview
+
+`NetworkConfig` is a Pydantic model that defines network settings for a SmolVM microVM, including IP addresses, gateway configuration, and SSH port forwarding.
+
+## Class Definition
+
+```python
+from smolvm.types import NetworkConfig
+```
+
+## Fields
+
+<ParamField path="guest_ip" type="str" required>
+  IP address assigned to the guest VM.
+
+  Example: `"172.16.0.2"`
+</ParamField>
+
+<ParamField path="gateway_ip" type="str" default="172.16.0.1">
+  Gateway IP address (host side of the TAP device).
+
+  This is the IP address that the guest uses as its default gateway to route traffic to the host.
+</ParamField>
+
+<ParamField path="netmask" type="str" default="255.255.255.0">
+  Network mask for the guest network.
+
+  Defines the subnet size for the VM's private network.
+</ParamField>
+
+<ParamField path="tap_device" type="str" required>
+  Name of the TAP network device.
+
+  Example: `"tap0"`, `"smolvm-tap1"`
+</ParamField>
+
+<ParamField path="guest_mac" type="str" required>
+  MAC address for the guest network interface.
+
+  Must be a valid MAC address in the standard format.
+
+  Example: `"AA:FC:00:00:00:01"`
+</ParamField>
+
+<ParamField path="ssh_host_port" type="int | None" default="None">
+  Optional host TCP port forwarded to guest SSH (port 22).
+
+  When set, allows SSH access to the guest VM via `localhost:<ssh_host_port>` on the host machine.
+
+  Example: `2222`
+</ParamField>
+
+## Usage Example
+
+```python
+from smolvm.types import NetworkConfig
+
+# Create a network configuration
+net_config = NetworkConfig(
+    guest_ip="172.16.0.5",
+    gateway_ip="172.16.0.1",
+    netmask="255.255.255.0",
+    tap_device="tap-vm1",
+    guest_mac="AA:FC:00:00:00:05",
+    ssh_host_port=2222
+)
+
+print(f"Guest IP: {net_config.guest_ip}")
+print(f"SSH port: {net_config.ssh_host_port}")
+```
+
+## Accessing from VMInfo
+
+Network configuration is typically accessed through a VM's runtime information:
+
+```python
+from smolvm import VM
+
+with VM() as vm:
+    info = vm.get_info()
+    if info.network:
+        print(f"VM IP: {info.network.guest_ip}")
+        print(f"Gateway: {info.network.gateway_ip}")
+        print(f"TAP device: {info.network.tap_device}")
+```
+
+## Properties
+
+- **Immutable**: `NetworkConfig` is frozen (Pydantic `model_config = {"frozen": True}`), meaning fields cannot be modified after instantiation.
+- **Type-validated**: All fields are validated by Pydantic according to their type annotations.
+
+## Related
+
+- [VMConfig](/api/vm-config) - Virtual machine configuration
+- [VMInfo](/api/vm-info) - Runtime VM information that includes NetworkConfig

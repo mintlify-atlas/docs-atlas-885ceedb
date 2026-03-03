@@ -1,80 +1,284 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get your first SmolVM running in minutes with real code examples
 ---
 
-## Get started in three steps
+# Quickstart
 
-Get your documentation site running locally and make your first customization.
+Get a secure, isolated microVM running in under 5 minutes. This guide walks you through creating your first VM, executing commands, and cleaning up resources.
 
-### Step 1: Set up your local environment
+## Your first VM
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+<Steps>
+  <Step title="Create and start a VM">
+    The simplest way to create a VM is with no arguments. SmolVM will auto-configure an SSH-ready environment:
+
+    ```python
+    from smolvm import SmolVM
+
+    # Start sandboxed runtime
+    vm = SmolVM()
+    vm.start()
+
+    # Run ANY command like a real system
+    result = vm.run("echo 'Hello from the sandbox!'")
+    print(result.output)
+
+    # Stop the runtime
+    vm.stop()
+    ```
+
+    <Note>
+      The first time you run SmolVM, it will build a base image. This takes about 30-60 seconds and only happens once.
+    </Note>
+  </Step>
+
+  <Step title="Use a context manager">
+    For automatic cleanup, use SmolVM as a context manager:
+
+    ```python
+    from smolvm import SmolVM
+
+    # VM auto-starts and deletes after use
+    with SmolVM() as vm:
+        result = vm.run("uname -a")
+        print(result.output)
+    ```
+
+    When the `with` block exits, the VM is automatically stopped and cleaned up.
+  </Step>
+
+  <Step title="Customize VM resources">
+    You can customize memory and disk size for auto-configured VMs:
+
+    ```python
+    from smolvm import SmolVM
+
+    # Use 2GB RAM and 4GB disk
+    with SmolVM(mem_size_mib=2048, disk_size_mib=4096) as vm:
+        print(vm.run("free -m").output)
+        print(vm.run("df -h /").output)
+    ```
+  </Step>
+</Steps>
+
+## Working with VMs
+
+### Execute commands
+
+Run commands in the VM and capture output:
+
+```python
+from smolvm import SmolVM
+
+with SmolVM() as vm:
+    # Run a simple command
+    result = vm.run("echo $HOME")
+    print(result.output)  # /root
+    print(result.exit_code)  # 0
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
+    # Handle command failures
+    result = vm.run("false")
+    if not result.ok:
+        print(f"Command failed with exit code {result.exit_code}")
+```
+
+### Environment variables
+
+Inject environment variables into the VM:
+
+```python
+from smolvm import SmolVM
+
+with SmolVM() as vm:
+    # Set environment variables
+    vm.set_env_vars({"API_KEY": "sk-...", "DEBUG": "1"})
     
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
+    # List all environment variables
+    print(vm.list_env_vars())
     
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    # Use them in commands
+    print(vm.run("echo $API_KEY").output)
+    
+    # Remove specific variables
+    vm.unset_env_vars(["DEBUG"])
+```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+<Note>
+  Environment variables are persisted in `/etc/profile.d/smolvm_env.sh` and apply to new SSH/login shell sessions.
+</Note>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+### Port forwarding
 
-### Step 3: Go live
+Expose guest applications to your local machine:
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+```python
+from smolvm import SmolVM
+
+with SmolVM() as vm:
+    # Start a web server in the VM
+    vm.run("nohup python3 -m http.server 8080 &", timeout=5)
+    
+    # Expose port 8080 to host port 18080
+    host_port = vm.expose_local(guest_port=8080, host_port=18080)
+    print(f"App available at http://localhost:{host_port}")
+    
+    # Keep VM running to access the service
+    input("Press Enter to stop...")
+```
+
+<Note>
+  `expose_local` prefers host-local nftables forwarding and automatically falls back to SSH tunneling when needed.
+</Note>
+
+### Reconnect to existing VMs
+
+You can reconnect to a running VM by its ID:
+
+```python
+from smolvm import SmolVM
+
+# Start a VM and get its ID
+vm = SmolVM()
+vm.start()
+vm_id = vm.vm_id
+print(f"VM ID: {vm_id}")
+
+# Later, reconnect to the same VM
+vm2 = SmolVM.from_id(vm_id)
+print(f"Status: {vm2.status}")
+print(vm2.run("hostname").output)
+```
+
+## Advanced configuration
+
+### Custom VM configuration
+
+For full control, use `VMConfig`:
+
+```python
+from smolvm import SmolVM, VMConfig, SSH_BOOT_ARGS, ImageBuilder
+from smolvm.utils import ensure_ssh_key
+
+# Prepare SSH keys
+private_key, public_key = ensure_ssh_key()
+
+# Build custom image
+kernel, rootfs = ImageBuilder().build_debian_ssh_key(
+    ssh_public_key=public_key,
+    name="debian-ssh-key-custom",
+    rootfs_size_mb=2048,
+)
+
+# Create custom configuration
+config = VMConfig(
+    vcpu_count=2,
+    mem_size_mib=2048,
+    kernel_path=kernel,
+    rootfs_path=rootfs,
+    boot_args=SSH_BOOT_ARGS,
+    disk_mode="isolated",  # Each VM gets its own disk
+)
+
+with SmolVM(config, ssh_key_path=str(private_key)) as vm:
+    print(f"VM IP: {vm.get_ip()}")
+    result = vm.run("nproc")  # Should show 2 CPUs
+    print(result.output)
+```
+
+### Disk isolation modes
+
+SmolVM defaults to **isolated per-VM disks** for security:
+
+```python
+from smolvm import VMConfig
+
+# Default: isolated mode (each VM gets its own writable rootfs clone)
+config = VMConfig(..., disk_mode="isolated")
+
+# Shared mode: multiple VMs share the same image (not recommended)
+config = VMConfig(..., disk_mode="shared")
+```
+
+<Warning>
+  Using `disk_mode="shared"` can lead to unexpected behavior when multiple VMs modify the same filesystem. Only use this if you understand the implications.
+</Warning>
+
+## CLI usage
+
+SmolVM provides CLI commands for common tasks:
+
+```bash
+# List available demos
+smolvm demo list
+
+# Run a simple demo
+smolvm demo simple
+
+# Manage environment variables
+smolvm env set <vm_id> API_KEY=sk-... DEBUG=1
+smolvm env list <vm_id> --show-values
+smolvm env unset <vm_id> DEBUG
+
+# Check system health
+smolvm doctor
+smolvm doctor --backend firecracker
+smolvm doctor --json --strict  # CI-friendly
+
+# Cleanup all VMs
+smolvm cleanup --all
+```
+
+## Complete example
+
+Here's a real-world example that sets up environment variables and runs a Python script:
+
+```python
+from smolvm import SmolVM
+
+def main() -> int:
+    with SmolVM() as vm:
+        print(f"VM started: {vm.vm_id}")
+
+        # Set environment variables
+        print("\n1) Set environment variables")
+        vm.set_env_vars({"APP_MODE": "dev", "DEBUG": "1"})
+        print(vm.list_env_vars())
+
+        # Use env vars in a command
+        print("\n2) Use env vars in a command")
+        print(vm.run("echo APP_MODE=$APP_MODE DEBUG=$DEBUG").output)
+
+        # Remove one variable
+        print("\n3) Remove one variable")
+        removed = vm.unset_env_vars(["DEBUG"])
+        print(f"Removed: {removed}")
+        print(vm.list_env_vars())
+
+    print("\nDone.")
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+<Note>
+  This example is adapted from `examples/env_injection.py` in the SmolVM source code.
+</Note>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="API Reference" icon="book" href="/api/smolvm">
+    Explore the full SmolVM API
+  </Card>
+  <Card title="Guides" icon="code" href="/guides/basic-usage">
+    See advanced usage patterns
+  </Card>
+  <Card title="Security" icon="shield" href="/operations/security-considerations">
+    Understand the security model
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/operations/troubleshooting">
+    Common issues and solutions
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

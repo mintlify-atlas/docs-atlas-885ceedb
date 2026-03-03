@@ -1,0 +1,261 @@
+---
+title: 'Security Model'
+description: 'Understanding SmolVM security boundaries, isolation guarantees, and trust model'
+icon: 'shield-halved'
+---
+
+## Security Philosophy
+
+SmolVM is designed for **local development and trusted environments** where AI agents need to execute untrusted code safely. The security model prioritizes:
+
+1. **Strong guest isolation** via hardware virtualization
+2. **Zero-touch VM access** for frictionless agent workflows
+3. **Transparency** about security boundaries and trade-offs
+
+<Note>
+  SmolVM is **not** designed for multi-tenant production environments or public-facing workloads without additional security controls.
+</Note>
+
+## Hardware Isolation
+
+### What You Get
+
+Hardware virtualization (KVM on Linux, Hypervisor.framework on macOS) provides strong isolation:
+
+- **Separate kernel**: Each VM runs its own Linux kernel in a separate memory space
+- **Memory isolation**: Guest memory is protected by hardware MMU (Memory Management Unit)
+- **No shared kernel**: Unlike containers, there's no shared kernel attack surface
+- **Minimal device emulation**: Firecracker exposes only virtio devices, reducing hypervisor attack surface
+
+<Info>
+  Firecracker is used in production by AWS Lambda to isolate millions of customer functions. It has undergone extensive security review and hardening.
+</Info>
+
+### What You Don't Get
+
+SmolVM is **not** a complete security boundary for adversarial code:
+
+<Warning>
+  **Important Limitations**:
+  - SmolVM does not protect against side-channel attacks (Spectre, Meltdown)
+  - Guest code can still consume host CPU/memory resources (no strict quotas)
+  - VMs run with default Firecracker security settings (no custom seccomp/AppArmor)
+  - Network egress is unrestricted by default (VMs can access the internet)
+</Warning>
+
+## Isolation Guarantees
+
+### VM-to-VM Isolation
+
+SmolVM enforces strict network isolation between VMs:
+
+```bash
+# nftables rule prevents VM-to-VM communication
+iifname "tap*" oifname "tap*" counter drop
+```
+
+Each VM:
+- Gets a **dedicated TAP device** (`tap-smol-xyz`)
+- Has a **unique IP address** in the `172.16.0.0/16` range (Firecracker) or `10.0.2.15` (QEMU)
+- **Cannot** connect to other SmolVM instances
+- **Can** access the internet via NAT (if host allows)
+
+### VM-to-Host Isolation
+
+The hypervisor (Firecracker/QEMU + KVM/HVF) provides the primary isolation:
+
+- Guest code runs in **unprivileged mode** (ring 3)
+- Host kernel manages VM via KVM ioctls
+- Firecracker process runs as **non-root user** (after initial setup)
+- No direct access to host filesystem (except explicit mounts)
+
+<Info>
+  You can restrict internet access by modifying nftables rules or using network namespaces. See the [networking concepts](/concepts/networking) for details on how networking is configured.
+</Info>
+
+## SSH Trust Model (Important)
+
+SmolVM prioritizes **zero-touch workflows** for ephemeral agent VMs. This has important security implications.
+
+### Current Implementation
+
+By default, SmolVM uses Paramiko's `AutoAddPolicy` for SSH host key verification:
+
+```python
+# In SmolVM's SSH client (simplified)
+client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+```
+
+This means:
+- **First connection**: Unknown host keys are automatically accepted
+- **No manual intervention**: No user prompt to verify fingerprints
+- **Ephemeral VMs**: Host keys are not persisted between runs
+
+### Security Impact
+
+<Warning>
+  **Man-in-the-Middle (MITM) Risk (CWE-295)**
+  
+  Accepting unknown host keys can allow MITM attacks if:
+  - SmolVM is used on untrusted networks (public WiFi, shared hosting)
+  - An attacker can intercept traffic between host and guest
+  - Guest SSH endpoints are exposed to untrusted networks
+  
+  **Mitigation**: Use SmolVM only on trusted hosts and local networks.
+</Warning>
+
+### Why This Design?
+
+For local agent workflows, the trade-off makes sense:
+
+- **VMs are ephemeral**: Created for a single task, then destroyed
+- **Host keys change**: Each VM boot generates a new SSH host key
+- **Local network**: Host-to-guest traffic stays on the loopback/TAP interface
+- **User friction**: Manually verifying fingerprints for 100+ ephemeral VMs is impractical
+
+### Recommended Operational Guidance
+
+From `SECURITY.md:81`:
+
+<Note>
+  **Best Practices**:
+  - Prefer **local-only usage** on developer machines or trusted CI runners
+  - **Avoid exposing** guest SSH endpoints to public or untrusted networks
+  - If your environment requires strict host identity validation, add **external network controls**:
+    - Private networking / VPC
+    - Firewall restrictions
+    - Bastion/proxy servers
+    - SSH key pinning at your deployment layer
+</Note>
+
+## Threat Model
+
+### What SmolVM Protects Against
+
+<Accordion title="Untrusted AI-Generated Code">
+  **Scenario**: An LLM generates malicious Python code that tries to read `/etc/passwd` or install a crypto miner.
+  
+  **Protection**: Code runs inside the guest VM with no access to host filesystem or processes. Even if it compromises the guest kernel, the hypervisor provides a hardware-enforced boundary.
+</Accordion>
+
+<Accordion title="Container Escape Exploits">
+  **Scenario**: Code exploits a known container runtime vulnerability (e.g., `runc` CVE).
+  
+  **Protection**: MicroVMs don't use container runtimes. Each VM has its own kernel, so container escape techniques don't apply.
+</Accordion>
+
+<Accordion title="Accidental System Damage">
+  **Scenario**: Buggy agent code runs `rm -rf /` or fills disk with logs.
+  
+  **Protection**: Damage is contained within the guest rootfs. Host system is unaffected. VM can be stopped and recreated in seconds.
+</Accordion>
+
+### What SmolVM Does NOT Protect Against
+
+<Accordion title="Host Resource Exhaustion">
+  **Scenario**: Agent spawns 1000 VMs or runs CPU-intensive code in a loop.
+  
+  **Limitation**: SmolVM does not enforce strict resource quotas. You must implement rate limiting at the application layer.
+</Accordion>
+
+<Accordion title="Side-Channel Attacks">
+  **Scenario**: Malicious code attempts Spectre/Meltdown-style attacks to read host memory.
+  
+  **Limitation**: SmolVM relies on kernel mitigations (KPTI, retpoline). It does not provide additional side-channel hardening beyond the host OS.
+</Accordion>
+
+<Accordion title="Network-Based Attacks">
+  **Scenario**: Guest VM participates in DDoS, scans for open ports, or exfiltrates data.
+  
+  **Limitation**: By default, VMs have unrestricted internet access via NAT. You must implement egress filtering if needed.
+</Accordion>
+
+<Accordion title="MITM on Untrusted Networks">
+  **Scenario**: Attacker intercepts SSH traffic between host and guest on public WiFi.
+  
+  **Limitation**: SSH host keys are not strictly validated (`AutoAddPolicy`). Use SmolVM only on trusted networks.
+</Accordion>
+
+## Disk Isolation and Data Leakage
+
+### Default: Isolated Mode
+
+SmolVM defaults to `disk_mode="isolated"` (see `README.md:106`):
+
+- Each VM gets a **copy-on-write clone** of the base rootfs
+- Changes are **not visible** to other VMs
+- Disk is **deleted** on `vm.stop()` or context manager exit
+- Prevents accidental data leakage between agent sessions
+
+```python
+from smolvm import SmolVM
+
+# Session 1: Write secret to disk
+with SmolVM() as vm1:
+    vm1.run("echo 'API_KEY=secret' > /tmp/config")
+    # VM1 disk deleted here
+
+# Session 2: Secret is NOT accessible
+with SmolVM() as vm2:
+    result = vm2.run("cat /tmp/config")
+    # FileNotFoundError - fresh rootfs
+```
+
+### Shared Mode (Use Carefully)
+
+<Warning>
+  **Data Leakage Risk**: Shared disk mode (`disk_mode="shared"`) allows all VMs to see the same rootfs. This can leak sensitive data between sessions:
+  
+  ```python
+  with SmolVM(disk_mode="shared") as vm1:
+      vm1.run("echo 'PASSWORD=hunter2' > /root/.env")
+  
+  with SmolVM(disk_mode="shared") as vm2:
+      # Can read vm1's .env file!
+      print(vm2.run("cat /root/.env").output)
+  ```
+  
+  Only use shared mode for development or when you fully control VM lifecycle.
+</Warning>
+
+## Environment Variables and Secrets
+
+SmolVM provides `set_env_vars()` to inject environment variables (see `README.md:133`):
+
+```python
+with SmolVM() as vm:
+    vm.set_env_vars({"API_KEY": "sk-...", "DEBUG": "1"})
+    # Variables persist in /etc/profile.d/smolvm_env.sh
+```
+
+<Warning>
+  **Secret Management**:
+  - Environment variables are stored **in plaintext** in the guest rootfs
+  - Avoid passing secrets to `shared` disk mode VMs
+  - Use isolated mode and regenerate secrets per session when possible
+</Warning>
+
+## Security Reporting
+
+If you discover a security vulnerability in SmolVM:
+
+<Card title="Report Privately" icon="bug" href="https://github.com/CelestoAI/SmolVM/security/advisories/new">
+  **Do not open public GitHub issues** for security bugs. Use GitHub's private vulnerability reporting flow.
+</Card>
+
+From `SECURITY.md:42`, include:
+- Clear description of the vulnerability and impact
+- Affected version/commit and host environment
+- Reproduction steps or proof-of-concept
+- Expected vs. actual behavior
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Networking Concepts" icon="network-wired" href="/concepts/networking">
+    Understand TAP devices, NAT, and port forwarding
+  </Card>
+  <Card title="MicroVM Architecture" icon="cubes" href="/concepts/microvm-architecture">
+    Understand the underlying virtualization technology
+  </Card>
+</CardGroup>

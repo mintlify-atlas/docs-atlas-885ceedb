@@ -1,0 +1,135 @@
+---
+title: CommandResult
+description: Result object returned from executing commands on a VM
+---
+
+## Overview
+
+`CommandResult` is a Pydantic model that encapsulates the output and status of a command executed on a guest VM. It is returned by `vm.run()` and provides both raw output streams and convenience properties.
+
+## Fields
+
+<ResponseField name="exit_code" type="int" required>
+  The exit code returned by the command. A value of `0` typically indicates success, while non-zero values indicate errors.
+</ResponseField>
+
+<ResponseField name="stdout" type="str" required>
+  The complete standard output captured from the command execution. This contains all text written to stdout by the process.
+</ResponseField>
+
+<ResponseField name="stderr" type="str" required>
+  The complete standard error output captured from the command execution. This contains all text written to stderr by the process.
+</ResponseField>
+
+## Properties
+
+### ok
+
+```python
+@property
+def ok(self) -> bool:
+    """Whether the command succeeded (exit_code == 0)."""
+```
+
+Convenience property that returns `True` if `exit_code == 0`, `False` otherwise.
+
+**Example:**
+```python
+result = vm.run("ls /tmp")
+if result.ok:
+    print("Command succeeded")
+else:
+    print(f"Command failed with code {result.exit_code}")
+```
+
+### output
+
+```python
+@property
+def output(self) -> str:
+    """Convenience alias for stripped standard output."""
+```
+
+Returns `stdout.strip()`, removing leading and trailing whitespace. Useful for cleaner output in most cases.
+
+**Example:**
+```python
+result = vm.run("hostname")
+print(f"Hostname: {result.output}")  # Clean output without newlines
+```
+
+## Usage Examples
+
+### Basic Command Execution
+
+```python
+from smolvm import VM
+
+with VM() as vm:
+    result = vm.run("echo 'Hello from SmolVM'")
+    print(f"Exit Code: {result.exit_code}")
+    print(f"Output: {result.stdout.strip()}")
+```
+
+### Error Handling
+
+```python
+result = vm.run("ls /nonexistent")
+
+if not result.ok:
+    print(f"Command failed with exit code {result.exit_code}")
+    print(f"Error: {result.stderr}")
+else:
+    print(f"Success: {result.output}")
+```
+
+### Checking Command Success
+
+```python
+# Using the ok property
+result = vm.run("apt-get update")
+if result.ok:
+    print("Update successful")
+    
+# Equivalent to checking exit code
+if result.exit_code == 0:
+    print("Update successful")
+```
+
+### Parsing Command Output
+
+```python
+# Get list of files
+result = vm.run("ls -1 /tmp")
+if result.ok:
+    files = result.output.split('\n')
+    print(f"Found {len(files)} files")
+```
+
+### Handling Both Streams
+
+```python
+result = vm.run("python script.py")
+
+print("=== STDOUT ===")
+print(result.stdout)
+
+print("=== STDERR ===")
+print(result.stderr)
+
+print(f"=== EXIT CODE: {result.exit_code} ===")
+```
+
+## Immutability
+
+`CommandResult` is a frozen Pydantic model, meaning instances are immutable after creation. This ensures the integrity of command results.
+
+```python
+result = vm.run("echo test")
+# result.exit_code = 1  # This would raise an error
+```
+
+## Related
+
+- [SmolVM.run()](/api/smolvm) - Execute commands and get CommandResult
+- [Exceptions](/api/exceptions) - Command execution errors

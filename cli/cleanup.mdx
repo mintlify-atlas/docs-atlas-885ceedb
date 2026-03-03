@@ -1,0 +1,390 @@
+---
+title: smolvm cleanup
+description: Clean stale VMs and reclaim system resources
+---
+
+## Overview
+
+The `smolvm cleanup` command removes VMs and their associated resources (TAP devices, network rules, state entries) from your system. By default, it targets stale VMs and auto-created VMs with the `vm-` prefix.
+
+## Basic Usage
+
+```bash
+smolvm cleanup
+```
+
+This performs cleanup of:
+- Stale VMs (VMs with state entries but no running processes)
+- Auto-created VMs (those with the default `vm-` prefix)
+
+## Command Syntax
+
+```bash
+smolvm cleanup [--all] [--prefix PREFIX] [--dry-run]
+```
+
+Alternatively, you can use the standalone script:
+
+```bash
+smolvm-cleanup [--all] [--prefix PREFIX] [--dry-run]
+```
+
+## Options
+
+<ParamField path="--all" type="boolean" default={false}>
+  Delete all VMs, not just stale or auto-created ones. Use with caution.
+</ParamField>
+
+<ParamField path="--prefix" type="string" default="vm-">
+  VM ID prefix to target for cleanup. Only VMs starting with this prefix (or marked as stale) will be deleted.
+</ParamField>
+
+<ParamField path="--dry-run" type="boolean" default={false}>
+  Print which VMs would be deleted without actually deleting them. Useful for previewing cleanup.
+</ParamField>
+
+## Examples
+
+### Preview Cleanup Targets
+
+Before deleting anything, see what would be removed:
+
+```bash
+smolvm cleanup --dry-run
+```
+
+```
+Reconciled stale VMs: vm-12345
+Targets (3):
+  - vm-12345
+  - vm-test-1
+  - vm-demo
+Dry run complete. No changes made.
+```
+
+### Clean Auto-Created VMs
+
+Remove all VMs with the default `vm-` prefix:
+
+```bash
+smolvm cleanup
+```
+
+```
+Reconciled stale VMs: vm-12345
+Targets (2):
+  - vm-12345
+  - vm-test-1
+Deleted: vm-12345
+Deleted: vm-test-1
+Cleanup complete.
+```
+
+### Clean VMs with Custom Prefix
+
+Target VMs with a specific naming pattern:
+
+```bash
+smolvm cleanup --prefix agent-
+```
+
+```
+Targets (3):
+  - agent-worker-1
+  - agent-worker-2
+  - agent-test
+Deleted: agent-worker-1
+Deleted: agent-worker-2
+Deleted: agent-test
+Cleanup complete.
+```
+
+### Delete All VMs
+
+Remove every VM known to SmolVM:
+
+```bash
+smolvm cleanup --all
+```
+
+```
+Targets (5):
+  - vm-12345
+  - production-vm
+  - staging-vm
+  - dev-vm
+  - test-vm
+Deleted: vm-12345
+Deleted: production-vm
+Deleted: staging-vm
+Deleted: dev-vm
+Deleted: test-vm
+Cleanup complete.
+```
+
+<Note>
+  The `--all` flag ignores the `--prefix` option and removes every VM regardless of naming.
+</Note>
+
+### Combine Dry Run with All
+
+Preview what `--all` would delete:
+
+```bash
+smolvm cleanup --all --dry-run
+```
+
+```
+Targets (8):
+  - vm-12345
+  - vm-test
+  - production-vm
+  - staging-db
+  - worker-1
+  - worker-2
+  - agent-dev
+  - my-custom-vm
+Dry run complete. No changes made.
+```
+
+## What Gets Cleaned
+
+When a VM is deleted, `smolvm cleanup` removes:
+
+1. **VM Process**: Stops the running Firecracker/QEMU process
+2. **TAP Device**: Deletes the network TAP interface
+3. **Network Rules**: Removes associated nftables rules and chains
+4. **State Entry**: Deletes the VM record from `~/.local/state/smolvm/smolvm.db`
+5. **Resources**: Cleans up any temporary files or sockets
+
+## Reconciliation
+
+Before performing cleanup, the command runs **reconciliation** to identify stale VMs:
+
+- VMs that have state entries but no running process
+- VMs with leftover resources (TAP devices, network rules) but no active VM
+
+Stale VMs are automatically included in cleanup targets:
+
+```bash
+smolvm cleanup
+```
+
+```
+Reconciled stale VMs: vm-old-1, vm-crashed-2
+Targets (4):
+  - vm-old-1     # stale
+  - vm-crashed-2 # stale
+  - vm-active-1  # matches prefix
+  - vm-test      # matches prefix
+```
+
+## Exit Codes
+
+- **0**: Success - all targets cleaned successfully (or no targets found)
+- **1**: Partial failure - one or more VMs failed to delete
+
+## Failure Handling
+
+If some VMs fail to delete, cleanup continues for remaining targets:
+
+```bash
+smolvm cleanup
+```
+
+```
+Targets (3):
+  - vm-test-1
+  - vm-test-2
+  - vm-test-3
+Deleted: vm-test-1
+Failed:  vm-test-2 (Permission denied)
+Deleted: vm-test-3
+Cleanup completed with 1 failure(s).
+```
+
+Exit code: `1`
+
+## Permissions
+
+Cleaning network resources (TAP devices, nftables rules) requires elevated privileges. If you run cleanup without sudo, you may see warnings:
+
+```bash
+smolvm cleanup
+```
+
+```
+Warning: not running as root. Cleanup may fail for TAP/nftables resources.
+Targets (2):
+  - vm-test-1
+  - vm-test-2
+Failed:  vm-test-1 (Permission denied: cannot delete TAP device)
+Failed:  vm-test-2 (Permission denied: cannot delete TAP device)
+Cleanup completed with 2 failure(s).
+```
+
+**Solution**: Run with sudo:
+
+```bash
+sudo smolvm cleanup
+```
+
+Or configure passwordless sudo via the system setup script:
+
+```bash
+sudo ./scripts/system-setup.sh --configure-runtime
+```
+
+## Common Patterns
+
+### Clean Before Testing
+
+Ensure a clean slate before running integration tests:
+
+```bash
+# Remove all auto-created VMs
+smolvm cleanup
+
+# Run tests
+pytest tests/
+
+# Clean up again
+smolvm cleanup
+```
+
+### Clean Specific Environments
+
+Use prefixes to organize and clean VMs by environment:
+
+```bash
+# Development VMs use dev- prefix
+smolvm cleanup --prefix dev-
+
+# Staging VMs use stg- prefix
+smolvm cleanup --prefix stg-
+
+# CI VMs use ci- prefix
+smolvm cleanup --prefix ci-
+```
+
+### Scheduled Cleanup
+
+Run periodic cleanup via cron to reclaim resources:
+
+```bash
+# Clean stale VMs daily at 2 AM
+0 2 * * * /usr/local/bin/smolvm cleanup >> /var/log/smolvm-cleanup.log 2>&1
+```
+
+## Safety Features
+
+### Dry Run Default
+
+Always preview before deleting:
+
+```bash
+# Step 1: Preview
+smolvm cleanup --dry-run
+
+# Step 2: If targets look correct, run for real
+smolvm cleanup
+```
+
+### Prefix-Based Targeting
+
+By default, only VMs with the `vm-` prefix are targeted. VMs with custom IDs are protected:
+
+```bash
+smolvm cleanup  # Only deletes vm-* VMs
+```
+
+To target custom VMs, use `--prefix` or `--all`:
+
+```bash
+smolvm cleanup --prefix production-  # Deletes production-* VMs
+smolvm cleanup --all                 # Deletes everything
+```
+
+## No Matching VMs
+
+If no VMs match the cleanup criteria:
+
+```bash
+smolvm cleanup --prefix foo-
+```
+
+```
+No matching VMs to clean.
+```
+
+Exit code: `0` (success)
+
+## Integration with Scripts
+
+Use cleanup in automation scripts:
+
+```bash
+#!/bin/bash
+set -e
+
+# Clean stale VMs
+if ! smolvm cleanup; then
+    echo "Warning: Cleanup had failures"
+fi
+
+# Create fresh VM
+python create_test_vm.py
+
+# Run tests
+pytest
+
+# Clean up
+smolvm cleanup --all
+```
+
+## Troubleshooting
+
+### Cleanup Hangs
+
+If cleanup appears to hang, a VM process may be unresponsive:
+
+```bash
+# Manually kill the Firecracker process
+pkill -9 firecracker
+
+# Then retry cleanup
+smolvm cleanup
+```
+
+### TAP Devices Persist
+
+If TAP devices remain after cleanup:
+
+```bash
+# List remaining TAP devices
+ip link show type tuntap
+
+# Manually remove (requires root)
+sudo ip link delete smolvm0
+```
+
+### State Database Corruption
+
+If the state database is corrupted:
+
+```bash
+# Backup the database
+cp ~/.local/state/smolvm/smolvm.db ~/.local/state/smolvm/smolvm.db.backup
+
+# Remove it (will be recreated)
+rm ~/.local/state/smolvm/smolvm.db
+
+# Run cleanup (will reconcile from live system)
+smolvm cleanup
+```
+
+## See Also
+
+- [CLI Overview](/cli/overview) - General CLI usage
+- [Doctor Command](/cli/doctor) - Validate your environment
+- [SmolVM API](/api/smolvm) - VM lifecycle management

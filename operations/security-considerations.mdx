@@ -1,0 +1,369 @@
+---
+title: 'Security Considerations'
+description: 'Security best practices and operational guidance for running SmolVM safely'
+---
+
+## Security Model Overview
+
+SmolVM provides hardware-level isolation through microVMs, offering significantly stronger security boundaries than traditional containers. However, proper operational practices are essential for maintaining a secure environment.
+
+<Info>
+  SmolVM uses KVM-backed microVMs (Firecracker on Linux, QEMU on macOS) to provide hardware-level isolation. Each VM runs with its own kernel, isolated from the host and other VMs.
+</Info>
+
+## Trust Model and Scope
+
+Understand what SmolVM protects against and where you need additional controls:
+
+### What SmolVM Protects
+
+- **Code execution isolation**: Untrusted code runs in a separate VM with its own kernel
+- **Resource isolation**: CPU, memory, and disk are isolated per-VM
+- **Network isolation**: Each VM has its own network namespace and IP
+- **Host protection**: Hardware virtualization prevents guest code from accessing the host
+
+### What Requires Additional Controls
+
+- **Network security**: SmolVM provides local NAT by default; external network security is your responsibility
+- **Data exfiltration**: VMs have internet access by default; implement network policies if needed
+- **Secrets management**: Don't pass sensitive credentials without proper protection
+- **Multi-tenancy**: Additional isolation may be needed for untrusted multi-tenant scenarios
+
+## Current SSH Trust Model (Important)
+
+<Warning>
+  SmolVM currently prioritizes zero-touch VM access for local agent workflows. SSH host keys are **not strictly verified** during first connection (`paramiko.AutoAddPolicy`).
+</Warning>
+
+### Security Impact
+
+The current SSH implementation:
+
+- **Accepts unknown host keys** on first connection
+- **Does not validate** host identity cryptographically
+- **Could allow** man-in-the-middle attacks in untrusted network environments (CWE-295)
+
+This is a deliberate trade-off for reduced friction in ephemeral, local VM lifecycles.
+
+### Recommended Usage
+
+SmolVM should be treated as a **trusted-host / trusted-network** local runtime:
+
+<Steps>
+<Step title="Use on trusted infrastructure">
+  Run SmolVM on:
+  - Local developer machines
+  - Trusted CI/CD runners
+  - Private networks with controlled access
+</Step>
+
+<Step title="Avoid public exposure">
+  Do **not** expose:
+  - Guest SSH endpoints to the internet
+  - VM management interfaces publicly
+  - Unprotected API endpoints from within VMs
+</Step>
+
+<Step title="Add network controls for production">
+  If deploying in production, implement:
+  - Private networking (VPC, isolated subnets)
+  - Firewall restrictions
+  - Bastion hosts or SSH proxies
+  - Network monitoring and logging
+</Step>
+</Steps>
+
+## Operational Security Best Practices
+
+### Secrets and Credentials Management
+
+Never expose secrets unnecessarily to VMs:
+
+```python
+from smolvm import SmolVM
+
+# ❌ BAD: Hard-coded secrets
+vm = SmolVM()
+vm.run("export API_KEY=sk-secret-key-here")
+
+# ✅ GOOD: Use environment variable injection
+with SmolVM() as vm:
+    vm.set_env_vars({"API_KEY": get_secret_from_vault()})
+    vm.run("./my-script.sh")  # Script can access $API_KEY
+```
+
+<Warning>
+  Secrets set via `set_env_vars()` are persisted in `/etc/profile.d/smolvm_env.sh` within the VM. Ensure VMs are properly destroyed after use.
+</Warning>
+
+### Best practices for secrets:
+
+1. **Use ephemeral VMs**: Destroy VMs immediately after use to avoid credential leakage
+2. **Rotate credentials**: Use short-lived tokens when possible
+3. **Limit scope**: Only provide the minimum required permissions
+4. **Audit access**: Log when secrets are injected into VMs
+
+### Network Security
+
+Control VM network access based on your threat model:
+
+#### Restricting Outbound Access
+
+If you need to limit VM internet access:
+
+```python
+from smolvm import SmolVM, VMConfig
+
+# Create VM without automatic NAT
+# (requires custom network configuration)
+config = VMConfig(
+    # Configure network manually for restricted access
+)
+vm = SmolVM(config=config)
+```
+
+<Info>
+  Future versions of SmolVM may include built-in network policy controls. For now, use host-level firewall rules to restrict VM traffic.
+</Info>
+
+#### Monitoring Network Activity
+
+Monitor VM network usage:
+
+```bash
+# Monitor connections from TAP devices
+sudo iftop -i tap0
+
+# Log outbound connections
+sudo tcpdump -i tap0 -n
+```
+
+### Resource Limits and DoS Prevention
+
+Preventing resource exhaustion:
+
+```python
+from smolvm import SmolVM
+
+# Set resource limits
+vm = SmolVM(
+    mem_size_mib=512,      # Limit memory
+    disk_size_mib=2048,    # Limit disk
+    vcpu_count=1           # Limit CPU cores
+)
+```
+
+<Warning>
+  Without resource limits, a malicious or buggy agent could consume excessive host resources. Always set appropriate limits for production deployments.
+</Warning>
+
+### Disk Isolation
+
+Use isolated disk mode (default) for per-VM disk isolation:
+
+```python
+from smolvm import SmolVM
+
+# Default: Each VM gets its own writable disk copy
+vm = SmolVM()  # disk_mode="isolated"
+```
+
+This ensures:
+- Changes in one VM don't affect others
+- VMs can't access each other's data
+- Clean slate on each VM creation
+
+<Info>
+  Isolated mode creates a copy-on-write disk for each VM. Disk changes are discarded when the VM is deleted.
+</Info>
+
+## Security Hardening Checklist
+
+Use this checklist for production deployments:
+
+<Steps>
+<Step title="Host hardening">
+  - [ ] Keep kernel and Firecracker/QEMU updated
+  - [ ] Enable AppArmor or SELinux policies
+  - [ ] Restrict access to `/dev/kvm`
+  - [ ] Run SmolVM processes with minimal privileges
+  - [ ] Enable host firewall (ufw, firewalld)
+</Step>
+
+<Step title="Network security">
+  - [ ] Use private networks for VM communication
+  - [ ] Implement egress filtering if needed
+  - [ ] Monitor network traffic for anomalies
+  - [ ] Avoid exposing SSH ports publicly
+  - [ ] Use VPN or bastion for remote access
+</Step>
+
+<Step title="Access control">
+  - [ ] Limit who can create/manage VMs
+  - [ ] Use RBAC for multi-user environments
+  - [ ] Audit VM creation and command execution
+  - [ ] Implement authentication for management APIs
+</Step>
+
+<Step title="Data protection">
+  - [ ] Use isolated disk mode (default)
+  - [ ] Encrypt sensitive data before passing to VMs
+  - [ ] Destroy VMs immediately after use
+  - [ ] Avoid storing secrets in VM images
+  - [ ] Regularly clean up stale VMs: `smolvm cleanup --all`
+</Step>
+
+<Step title="Monitoring and incident response">
+  - [ ] Enable detailed logging
+  - [ ] Monitor VM resource usage
+  - [ ] Set up alerts for anomalous behavior
+  - [ ] Have a process for revoking compromised credentials
+  - [ ] Test incident response procedures
+</Step>
+</Steps>
+
+## Security in AI Agent Scenarios
+
+Special considerations when running LLM-generated code:
+
+### Code Sandboxing
+
+Always execute untrusted LLM-generated code in isolated VMs:
+
+```python
+from smolvm import SmolVM
+
+def execute_agent_code(llm_generated_code: str) -> str:
+    """Safely execute code generated by an LLM."""
+    with SmolVM() as vm:
+        # Each execution gets a fresh, isolated VM
+        result = vm.run(llm_generated_code)
+        
+        if result.exit_code != 0:
+            return f"Error: {result.stderr}"
+        return result.stdout
+```
+
+<Info>
+  Using a context manager (`with SmolVM()`) ensures the VM is automatically destroyed after execution, preventing data leakage between runs.
+</Info>
+
+### Preventing Prompt Injection Attacks
+
+LLM-generated code might attempt to exfiltrate data or escalate privileges:
+
+```python
+from smolvm import SmolVM
+import re
+
+def safe_execute(code: str) -> str:
+    """Execute code with basic validation."""
+    
+    # Basic sanity checks (not exhaustive)
+    dangerous_patterns = [
+        r'curl.*http',      # Potential data exfiltration
+        r'wget.*http',      # Potential data exfiltration  
+        r'nc.*-e',          # Reverse shell attempts
+        r'bash.*-i',        # Interactive shell
+    ]
+    
+    for pattern in dangerous_patterns:
+        if re.search(pattern, code, re.IGNORECASE):
+            return "Error: Potentially unsafe command detected"
+    
+    # Execute in isolated VM
+    with SmolVM() as vm:
+        result = vm.run(code)
+        return result.output
+```
+
+<Warning>
+  Pattern matching is not a complete security solution. Always assume LLM-generated code could be malicious and rely on SmolVM's isolation as the primary defense.
+</Warning>
+
+### Rate Limiting and Resource Quotas
+
+Prevent abuse in agent scenarios:
+
+```python
+import time
+from collections import defaultdict
+from smolvm import SmolVM
+
+class RateLimitedExecutor:
+    def __init__(self, max_vms_per_user: int = 5):
+        self.active_vms = defaultdict(int)
+        self.max_vms_per_user = max_vms_per_user
+    
+    def execute_for_user(self, user_id: str, code: str) -> str:
+        if self.active_vms[user_id] >= self.max_vms_per_user:
+            return "Error: Rate limit exceeded"
+        
+        self.active_vms[user_id] += 1
+        try:
+            with SmolVM() as vm:
+                result = vm.run(code)
+                return result.output
+        finally:
+            self.active_vms[user_id] -= 1
+```
+
+## Vulnerability Reporting
+
+If you discover a security vulnerability in SmolVM:
+
+<Warning>
+  **Do not** open public GitHub issues for security vulnerabilities.
+</Warning>
+
+### Reporting Process
+
+1. **Use GitHub's private reporting**: https://github.com/CelestoAI/SmolVM/security/advisories/new
+2. **Include in your report**:
+   - Clear description of the vulnerability and impact
+   - Affected version/commit and environment (OS, architecture)
+   - Reproduction steps or proof-of-concept
+   - Expected vs. actual behavior
+   - Suggested mitigation if available
+
+3. **Response timeline** (best effort):
+   - Acknowledgment within 3 business days
+   - Triage and severity assessment within 7 business days
+   - Periodic updates as fixes are developed
+
+### Coordinated Disclosure
+
+- Please allow reasonable time for a fix before public disclosure
+- Security advisories will be published for confirmed issues
+- Reporter credit is provided unless anonymity is requested
+
+## Security Scope
+
+This security policy covers:
+- Vulnerabilities in SmolVM code and release artifacts
+- Issues caused by documented SmolVM usage patterns
+
+**Out of scope** (unless caused by SmolVM code):
+- Vulnerabilities in third-party dependencies or upstream projects
+- Host misconfiguration outside documented setup
+- Security findings without realistic exploit path or impact
+
+## License and Disclaimer
+
+<Info>
+  SmolVM is licensed under **Apache License 2.0**. All software is provided **"AS IS"** without warranties.
+</Info>
+
+The security guidance in this document is provided on a best-effort basis and does not create any contractual, legal, or binding obligation on maintainers.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Performance" icon="gauge-high" href="/operations/performance">
+    Optimize VM performance for your workload
+  </Card>
+  
+  <Card title="Troubleshooting" icon="screwdriver-wrench" href="/operations/troubleshooting">
+    Debug issues and resolve errors
+  </Card>
+</CardGroup>
